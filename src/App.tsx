@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import {
   Gamepad2,
   Shield,
@@ -28,6 +28,10 @@ import {
   ImageIcon,
   Video,
   LayoutPanelTop,
+  Upload,
+  RefreshCw,
+  Download,
+  Search
 } from 'lucide-react';
 import {
   supabase,
@@ -107,109 +111,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       <label className="block text-sm font-medium text-gray-300 mb-1.5">{label}</label>
       {hint && <p className="text-xs text-gray-500 mb-2">{hint}</p>}
       {children}
-    </div>
-  );
-}
-
-
-type MediaKind = 'image' | 'video';
-
-function extractStoragePath(publicUrl: string) {
-  const marker = '/storage/v1/object/public/site-media/';
-  const index = publicUrl.indexOf(marker);
-  return index >= 0 ? decodeURIComponent(publicUrl.slice(index + marker.length)) : null;
-}
-
-function MediaUploader({
-  value,
-  onChange,
-  kind,
-  label,
-}: {
-  value: string;
-  onChange: (url: string) => void;
-  kind: MediaKind;
-  label?: string;
-}) {
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const accept = kind === 'image' ? 'image/jpeg,image/png,image/webp,image/gif' : 'video/mp4,video/webm';
-  const maxSize = kind === 'image' ? 10 * 1024 * 1024 : 100 * 1024 * 1024;
-
-  async function upload(file: File) {
-    setError('');
-    if (!file.type.startsWith(`${kind}/`)) {
-      setError(kind === 'image' ? 'اختر ملف صورة صالحًا.' : 'اختر ملف فيديو صالحًا.');
-      return;
-    }
-    if (file.size > maxSize) {
-      setError(kind === 'image' ? 'حجم الصورة يجب ألا يتجاوز 10MB.' : 'حجم الفيديو يجب ألا يتجاوز 100MB.');
-      return;
-    }
-
-    setUploading(true);
-    const extension = file.name.split('.').pop()?.toLowerCase() || (kind === 'image' ? 'jpg' : 'mp4');
-    const safeName = `${crypto.randomUUID()}.${extension}`;
-    const path = `${kind === 'image' ? 'images' : 'videos'}/${new Date().getFullYear()}/${safeName}`;
-    const { error: uploadError } = await supabase.storage.from('site-media').upload(path, file, {
-      cacheControl: '3600',
-      upsert: false,
-      contentType: file.type,
-    });
-
-    if (uploadError) {
-      setError(`تعذر رفع الملف: ${uploadError.message}`);
-      setUploading(false);
-      return;
-    }
-
-    const { data } = supabase.storage.from('site-media').getPublicUrl(path);
-    onChange(data.publicUrl);
-    setUploading(false);
-  }
-
-  async function remove() {
-    const path = extractStoragePath(value);
-    if (path) await supabase.storage.from('site-media').remove([path]);
-    onChange('');
-    if (inputRef.current) inputRef.current.value = '';
-  }
-
-  return (
-    <div className="space-y-3">
-      <input
-        ref={inputRef}
-        type="file"
-        accept={accept}
-        className="hidden"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) upload(file);
-        }}
-      />
-      <button
-        type="button"
-        onClick={() => inputRef.current?.click()}
-        disabled={uploading}
-        className="w-full rounded-xl border border-dashed border-amber-500/35 bg-amber-500/5 px-4 py-4 text-sm text-amber-300 transition-all hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-60"
-      >
-        {uploading ? 'جاري رفع الملف...' : label || (kind === 'image' ? 'اختيار صورة من الجهاز' : 'اختيار فيديو من الجهاز')}
-      </button>
-      {error && <p className="text-sm text-red-400">{error}</p>}
-      {value && (
-        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20 p-2">
-          {kind === 'image' ? (
-            <img src={value} alt="معاينة الملف" className="max-h-52 w-full rounded-lg object-contain" />
-          ) : (
-            <video src={value} controls className="max-h-64 w-full rounded-lg" />
-          )}
-          <div className="mt-2 flex gap-2">
-            <button type="button" onClick={() => inputRef.current?.click()} className="flex-1 rounded-lg bg-white/5 px-3 py-2 text-xs text-gray-300 hover:bg-white/10">استبدال الملف</button>
-            <button type="button" onClick={remove} className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400 hover:bg-red-500/20">حذف الملف</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -537,413 +438,551 @@ function PublicPage({ settings }: { settings: Settings }) {
 }
 
 // ============ BOOKS PUBLIC VIEW ==========
-function BooksPublicView({ books }: { books: Book[] }) {
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
-  const [pages, setPages] = useState<BookPage[]>([]);
-  const [chapters, setChapters] = useState<ConstitutionChapter[]>([]);
-  const [articles, setArticles] = useState<ConstitutionArticle[]>([]);
-  const [loading, setLoading] = useState(false);
+type LibraryBookEntry = {
+  key: string;
+  title: string;
+  description: string;
+  cover: string;
+  featured?: boolean;
+  book: Book;
+  isPersisted: boolean;
+};
 
-  useEffect(() => {
-    if (!books.length) {
-      setSelectedBookId(null);
-      setPages([]);
-      return;
-    }
-    if (!selectedBookId || !books.some((book) => book.id === selectedBookId)) {
-      setSelectedBookId(books[0].id);
-    }
-  }, [books, selectedBookId]);
+const LIBRARY_CATALOG = [
+  { key: 'constitution', title: 'دستور مدينة ساندي', description: 'الوثيقة القانونية العليا والمرجع الأساسي لجميع القوانين والأنظمة.', cover: '/library/constitution.jpg', aliases: ['دستور مدينة ساندي', 'الدستور'], featured: true },
+  { key: 'penalties', title: 'العقوبات', description: 'الجرائم ومدد السجن والغرامات والكفالة والإجراءات الإضافية.', cover: '/library/penalties.jpg', aliases: ['العقوبات', 'قانون العقوبات'] },
+  { key: 'roleplay', title: 'قوانين الرول بلاي', description: 'القواعد المنظمة للواقعية والتفاعل وسلوك اللاعبين داخل المدينة.', cover: '/library/roleplay.jpg', aliases: ['قوانين الرول بلاي', 'الرول بلاي', 'رول بلاي'] },
+  { key: 'police', title: 'قوانين الشرطة', description: 'التوقيف والتفتيش واستخدام القوة والإجراءات الأمنية.', cover: '/library/police.jpg', aliases: ['قوانين الشرطة', 'الشرطة'] },
+  { key: 'judiciary', title: 'القضاء', description: 'المحاكم والجلسات وصلاحيات القضاة والإجراءات القضائية.', cover: '/library/judiciary.jpg', aliases: ['القضاء', 'قوانين المحكمة', 'المحكمة'] },
+  { key: 'management', title: 'الإدارة', description: 'اللوائح الإدارية والصلاحيات والتعليمات المنظمة لعمل الإدارة.', cover: '/library/management.jpg', aliases: ['الإدارة', 'نظام الإدارة'] },
+  { key: 'ems', title: 'دليل الإسعاف', description: 'الإجراءات الطبية وأولوية الحالات وسرية معلومات المرضى.', cover: '/library/ems.jpg', aliases: ['دليل الإسعاف', 'الإسعاف'] },
+  { key: 'gangs', title: 'نظام العصابات', description: 'المنظمات وقواعد المسؤولية والنزاعات داخل المدينة.', cover: '/library/gangs.jpg', aliases: ['نظام العصابات', 'العصابات'] },
+] as const;
 
-  useEffect(() => {
-    if (!selectedBookId) return;
-    let active = true;
-    (async () => {
-      setLoading(true);
-      const [{ data: pageData, error: pageError }, { data: chapterData, error: chapterError }, { data: articleData, error: articleError }] = await Promise.all([
-        supabase.from('book_pages').select('*').eq('book_id', selectedBookId).order('sort_order', { ascending: true }),
-        supabase.from('constitution_chapters').select('*').eq('book_id', selectedBookId).eq('is_visible', true).order('sort_order', { ascending: true }),
-        supabase.from('constitution_articles').select('*').eq('book_id', selectedBookId).eq('is_visible', true).order('sort_order', { ascending: true }),
-      ]);
-      if (active && !pageError) setPages((pageData || []) as BookPage[]);
-      if (active && !chapterError) setChapters((chapterData || []) as ConstitutionChapter[]);
-      if (active && !articleError) setArticles((articleData || []) as ConstitutionArticle[]);
-      if (active) setLoading(false);
-    })();
-    return () => { active = false; };
-  }, [selectedBookId]);
-
-  const selectedBook = books.find((book) => book.id === selectedBookId) || null;
-
-  if (!books.length) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 text-gray-500 bg-white/[0.02] border border-white/10 rounded-2xl">
-        <BookOpen className="w-12 h-12 mb-3 opacity-30" />
-        <p>لا توجد كتب متاحة بعد</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1 space-y-3">
-          {books.map((book) => (
-            <button
-              key={book.id}
-              onClick={() => setSelectedBookId(book.id)}
-              className={`w-full text-right rounded-2xl border p-4 transition-all ${selectedBookId === book.id ? 'bg-amber-500/10 border-amber-500/30 text-white' : 'bg-white/[0.02] border-white/10 text-gray-400 hover:border-white/20 hover:text-white'}`}
-            >
-              <div className="flex items-start gap-3">
-                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                  <DynamicIcon name={book.icon || 'BookOpen'} className="w-5 h-5 text-amber-500" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-bold text-white text-sm">{book.title}</h3>
-                  <p className="text-xs text-gray-500 mt-1 line-clamp-2">{book.description || 'كتاب دستوري متكامل'}</p>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-
-        <div className="lg:col-span-2">
-          {selectedBook ? <BookReader book={selectedBook} pages={pages} chapters={chapters} articles={articles} loading={loading} /> : null}
-        </div>
-      </div>
-    </div>
-  );
+function normalizeBookTitle(value: unknown) {
+  return String(value ?? '')
+    .replace(/[ـًٌٍَُِّْ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
-function BookReader({ book, pages, chapters, articles, loading }: { book: Book; pages: BookPage[]; chapters: ConstitutionChapter[]; articles: ConstitutionArticle[]; loading: boolean }) {
-  const [currentPage, setCurrentPage] = useState(0);
-  const [isAnimating, setIsAnimating] = useState(false);
-  const [flipDirection, setFlipDirection] = useState<'next' | 'prev' | null>(null);
-  const [touchStartX, setTouchStartX] = useState<number | null>(null);
-  const [turnTargetIndex, setTurnTargetIndex] = useState<number | null>(null);
-  const timeoutRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    setCurrentPage(0);
-    setIsAnimating(false);
-    setFlipDirection(null);
-    setTurnTargetIndex(null);
-    if (timeoutRef.current) {
-      window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-  }, [book.id]);
+class BookReaderErrorBoundary extends Component<
+  { children: ReactNode; onBack: () => void },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
 
-  useEffect(() => () => {
-    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
-  }, []);
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
 
-  const constitutionPages = chapters.flatMap((chapter) => {
-    const chapterArticles = articles
-      .filter((article) => article.chapter_id === chapter.id)
-      .sort((a, b) => a.sort_order - b.sort_order);
-    if (!chapterArticles.length) return [];
+  componentDidCatch(error: Error, info: unknown) {
+    console.error('Book reader crashed:', error, info);
+  }
 
-    const chunks: ConstitutionArticle[][] = [];
-    let currentChunk: ConstitutionArticle[] = [];
-    let currentLength = 0;
-
-    chapterArticles.forEach((article) => {
-      const articleLength = `${article.title} ${article.content}`.length;
-      const shouldStartNewPage = currentChunk.length >= 4 || (currentChunk.length >= 2 && currentLength + articleLength > 1250);
-      if (shouldStartNewPage) {
-        chunks.push(currentChunk);
-        currentChunk = [];
-        currentLength = 0;
-      }
-      currentChunk.push(article);
-      currentLength += articleLength;
-    });
-    if (currentChunk.length) chunks.push(currentChunk);
-
-    return chunks.map((chunk, chunkIndex) => ({
-      id: `chapter-${chapter.id}-${chunkIndex}`,
-      title: chunkIndex === 0 ? chapter.title : `${chapter.title} — تابع`,
-      content: `${chunkIndex === 0 && chapter.description ? `${chapter.description}\n\n` : ''}${chunk
-        .map((article) => `المادة (${article.article_number}): ${article.title}\n${article.content}`)
-        .join('\n\n')}`,
-      image_url: '',
-      page_number: 0,
-      sort_order: chapter.sort_order * 100 + chunkIndex,
-      created_at: chapter.created_at,
-      book_id: book.id,
-    } as BookPage));
-  });
-
-  const displayPages = [{ id: 'cover', title: book.title, content: book.description, image_url: book.cover_image_url, page_number: 0, sort_order: -1, created_at: book.created_at, book_id: book.id } as BookPage, ...pages, ...constitutionPages];
-
-  const goToPage = (targetIndex: number, direction: 'next' | 'prev') => {
-    if (targetIndex < 0 || targetIndex >= displayPages.length || isAnimating || targetIndex === currentPage) return;
-    setFlipDirection(direction);
-    setTurnTargetIndex(targetIndex);
-    setIsAnimating(true);
-    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = window.setTimeout(() => {
-      setCurrentPage(targetIndex);
-      setIsAnimating(false);
-      setFlipDirection(null);
-      setTurnTargetIndex(null);
-      timeoutRef.current = null;
-    }, 780);
-  };
-
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        goToPage(currentPage + 1, 'next');
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        goToPage(currentPage - 1, 'prev');
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [currentPage, isAnimating, displayPages.length]);
-
-  const currentPageData = displayPages[currentPage] || displayPages[0];
-  const isCover = currentPage === 0;
-  const isFirstPage = currentPage === 0;
-  const isLastPage = currentPage >= displayPages.length - 1;
-  const totalPages = displayPages.length;
-  const leftPageData = currentPage === 0 ? displayPages[0] : displayPages[currentPage - 1];
-  const rightPageData = currentPage === 0 ? null : displayPages[currentPage];
-  const animatedFrontPage = isAnimating && flipDirection === 'next'
-    ? displayPages[currentPage]
-    : isAnimating && flipDirection === 'prev'
-      ? displayPages[currentPage - 1]
-      : null;
-  const animatedBackPage = isAnimating && turnTargetIndex !== null
-    ? (flipDirection === 'next'
-        ? displayPages[Math.min(displayPages.length - 1, turnTargetIndex)]
-        : displayPages[Math.max(0, turnTargetIndex - 1)])
-    : null;
-
-  const getFlipClass = (side: 'left' | 'right') => {
-    if (!isAnimating) return '';
-    if (side === 'left') {
-      return flipDirection === 'prev' ? 'page-turn-left' : '';
-    }
-    return flipDirection === 'next' ? 'page-turn-right' : '';
-  };
-
-  const renderPageContent = (page: BookPage | null, side: 'left' | 'right') => {
-    const isRight = side === 'right';
-    if (!page) {
+  render() {
+    if (this.state.error) {
       return (
-        <div className="flex h-full min-h-[480px] items-center justify-center px-5 py-8 text-center text-[#8a6a43]">
-          <div className="rounded-2xl border border-dashed border-[#9b7454]/25 bg-[#a06f3f]/10 px-6 py-10">
-            صفحة فارغة
-          </div>
-        </div>
-      );
-    }
-    if (page.id === 'cover') {
-      return (
-        <div className="flex h-full min-h-[480px] flex-col items-center justify-center text-center px-5 py-8">
-          <div className="mb-6 flex items-center justify-center gap-3 rounded-full border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-amber-400">
-            <Scale className="h-4 w-4" />
-            <span className="text-sm font-semibold">النسخة الرسمية</span>
-            <Crown className="h-4 w-4" />
-          </div>
-          <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-full border border-amber-500/20 bg-[#2f2418]/70 shadow-[0_0_40px_rgba(245,158,11,0.15)]">
-            <BookOpen className="h-10 w-10 text-amber-400" />
-          </div>
-          <h4 className="mb-3 text-3xl font-bold text-[#3c2710]">دستور مدينة ساندي</h4>
-          <p className="mb-6 max-w-lg text-lg leading-loose text-[#5c4331]">نسخة قانونية مهيبة تجمع بين التوثيق والوضوح في طابع من الورق العتيق.</p>
-          <div className="grid w-full max-w-md gap-3 text-sm text-[#5c4331] sm:grid-cols-2">
-            <div className="rounded-2xl border border-[#9b7454]/25 bg-[#7f5b3b]/10 p-3">التاريخ:<br />2 أغسطس 2026</div>
-            <div className="rounded-2xl border border-[#9b7454]/25 bg-[#7f5b3b]/10 p-3">الوقت:<br />12:35 ليلاً</div>
-          </div>
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center">
+          <h3 className="text-xl font-black text-red-200">حدث خطأ أثناء فتح الكتاب</h3>
+          <p className="mt-3 break-words rounded-xl bg-black/20 p-3 font-mono text-sm text-red-100">
+            {this.state.error.message || 'خطأ غير معروف'}
+          </p>
           <button
-            onClick={() => goToPage(1, 'next')}
-            className="mt-6 rounded-full bg-[#7a4d18] px-6 py-3 font-semibold text-[#fff6e8] shadow-lg shadow-[#7a4d18]/20 transition-all hover:-translate-y-0.5 hover:bg-[#956127]"
+            onClick={() => {
+              this.setState({ error: null });
+              this.props.onBack();
+            }}
+            className="mt-4 rounded-xl bg-white/10 px-5 py-2.5 font-bold text-white hover:bg-white/15"
           >
-            ابدأ القراءة
+            العودة إلى المكتبة
           </button>
         </div>
       );
     }
+    return this.props.children;
+  }
+}
+
+function BooksPublicView({ books }: { books: Book[] }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [pages, setPages] = useState<BookPage[]>([]);
+  const [chapters, setChapters] = useState<ConstitutionChapter[]>([]);
+  const [articles, setArticles] = useState<ConstitutionArticle[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+
+  const matchedBookIds = new Set<string>();
+  const catalogEntries: LibraryBookEntry[] = LIBRARY_CATALOG.map((item, index) => {
+    const aliases = item.aliases.map(normalizeBookTitle);
+    const actualBook = books.find((candidate) => !matchedBookIds.has(candidate.id) && aliases.includes(normalizeBookTitle(candidate.title)));
+    if (actualBook) matchedBookIds.add(actualBook.id);
+    const virtualBook: Book = {
+      id: `virtual-${item.key}`,
+      title: item.title,
+      description: item.description,
+      cover_image_url: item.cover,
+      icon: 'BookOpen',
+      is_visible: true,
+      sort_order: index,
+      created_at: new Date().toISOString(),
+    };
+    return {
+      key: item.key,
+      title: item.title,
+      description: actualBook?.description || item.description,
+      cover: actualBook?.cover_image_url || item.cover,
+      featured: 'featured' in item ? Boolean(item.featured) : false,
+      book: actualBook || virtualBook,
+      isPersisted: Boolean(actualBook),
+    };
+  });
+
+  const customEntries: LibraryBookEntry[] = books
+    .filter((book) => book.is_visible && !matchedBookIds.has(book.id))
+    .filter((book) => normalizeBookTitle(book.title) !== normalizeBookTitle('عقوبات الدستور'))
+    .filter((book, index, source) => source.findIndex((candidate) => normalizeBookTitle(candidate.title) === normalizeBookTitle(book.title)) === index)
+    .map((book) => ({
+      key: `custom-${book.id}`,
+      title: book.title,
+      description: book.description || 'كتاب من مكتبة مدينة ساندي',
+      cover: book.cover_image_url || '/library/constitution.jpg',
+      book,
+      isPersisted: true,
+    }));
+
+  const normalizedEntryTitle = (value: string) =>
+    value
+      .replace(/مدينة ساندي|قانون|قوانين|كتاب|نظام|دليل/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  const dedupedEntries = [...catalogEntries, ...customEntries].filter((entry, index, all) => {
+    const normalized = normalizedEntryTitle(entry.title);
+    return all.findIndex((candidate) => normalizedEntryTitle(candidate.title) === normalized) === index;
+  });
+
+  const entries = dedupedEntries;
+  const normalizedLibrarySearch = librarySearch.trim().toLowerCase();
+  const visibleEntries = normalizedLibrarySearch
+    ? entries.filter((entry) =>
+        `${entry.title} ${entry.description}`.toLowerCase().includes(normalizedLibrarySearch),
+      )
+    : entries;
+
+  const selectedEntry = entries.find((entry) => entry.key === selectedKey) || null;
+
+  useEffect(() => {
+    if (!selectedEntry || !selectedEntry.isPersisted) {
+      setPages([]);
+      setChapters([]);
+      setArticles([]);
+      setLoading(false);
+      return;
+    }
+
+    let active = true;
+    (async () => {
+      setLoading(true);
+      setLoadError('');
+      const bookId = selectedEntry.book.id;
+      const [{ data: pageData, error: pageError }, { data: chapterData, error: chapterError }, { data: articleData, error: articleError }] = await Promise.all([
+        supabase.from('book_pages').select('*').eq('book_id', bookId).order('sort_order', { ascending: true }),
+        supabase.from('constitution_chapters').select('*').eq('book_id', bookId).eq('is_visible', true).order('sort_order', { ascending: true }),
+        supabase.from('constitution_articles').select('*').eq('book_id', bookId).eq('is_visible', true).order('sort_order', { ascending: true }),
+      ]);
+      if (active && !pageError) setPages((pageData || []) as BookPage[]);
+      if (active && !chapterError) setChapters((chapterData || []) as ConstitutionChapter[]);
+      if (active && !articleError) setArticles((articleData || []) as ConstitutionArticle[]);
+      const firstError = pageError || chapterError || articleError;
+      if (active && firstError) setLoadError(firstError.message || 'تعذر تحميل محتوى الكتاب.');
+      if (active) setLoading(false);
+    })();
+    return () => { active = false; };
+  }, [selectedEntry?.book.id, selectedEntry?.isPersisted]);
+
+  if (selectedEntry) {
+    return (
+      <div className="space-y-5">
+        <button onClick={() => setSelectedKey(null)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-gray-300 transition-colors hover:border-amber-500/30 hover:text-white">
+          <ArrowLeft className="h-4 w-4 rotate-180" />
+          العودة إلى المكتبة
+        </button>
+        {!selectedEntry.isPersisted && (
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            هذا الكتاب موجود في واجهة المكتبة، لكنه لا يحتوي على محتوى محفوظ بعد. ستتم إضافة محتواه من لوحة التحكم في المرحلة التالية.
+          </div>
+        )}
+        {loadError && (
+          <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            تعذر تحميل بعض محتوى الكتاب: {loadError}
+          </div>
+        )}
+        <BookReaderErrorBoundary onBack={() => setSelectedKey(null)}>
+          <BookReader
+            book={selectedEntry.book}
+            pages={pages}
+            chapters={chapters}
+            articles={articles}
+            loading={loading}
+            onBack={() => setSelectedKey(null)}
+          />
+        </BookReaderErrorBoundary>
+      </div>
+    );
+  }
+
+  const featured = visibleEntries.find((entry) => entry.featured) || visibleEntries[0];
+  const regular = visibleEntries.filter((entry) => entry.key !== featured?.key);
+
+  const BookCard = ({ entry, large = false }: { entry: LibraryBookEntry; large?: boolean }) => (
+    <button
+      onClick={() => setSelectedKey(entry.key)}
+      className={`group relative overflow-hidden rounded-[1.35rem] border border-white/10 bg-[#111219] text-right shadow-[0_18px_45px_rgba(0,0,0,.28)] transition-all duration-300 hover:-translate-y-2 hover:scale-[1.025] hover:border-amber-400/60 hover:shadow-[0_24px_65px_rgba(245,158,11,.18)] ${large ? 'mx-auto w-full max-w-[320px]' : 'w-full max-w-[250px]'}`}
+    >
+      <div className={`${large ? 'aspect-[5/6.4]' : 'aspect-[5/7]'} relative overflow-hidden`}>
+        <img
+          src={entry.cover}
+          alt={`غلاف ${entry.title}`}
+          onError={(event) => {
+            event.currentTarget.onerror = null;
+            event.currentTarget.src = '/library/constitution.jpg';
+          }}
+          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.06]"
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 p-4 sm:p-5">
+          <h3 className={`${large ? 'text-2xl' : 'text-xl'} font-black text-white drop-shadow-lg`}>{entry.title}</h3>
+          <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-gray-200/85">{entry.description}</p>
+          <span className="mt-4 inline-flex translate-y-3 items-center gap-2 rounded-full bg-amber-500 px-4 py-2 text-xs font-bold text-black opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100">
+            <BookOpen className="h-4 w-4" />
+            فتح الكتاب
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+
+  return (
+    <div className="space-y-10">
+      <div className="text-center">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/20 bg-amber-500/10">
+          <BookOpen className="h-7 w-7 text-amber-400" />
+        </div>
+        <h2 className="text-3xl font-black text-white">المكتبة القانونية</h2>
+        <p className="mx-auto mt-3 max-w-2xl text-sm leading-loose text-gray-400">جميع القوانين والأنظمة في كتب مستقلة. اختر الغلاف لفتح الكتاب بنفس قارئ الدستور.</p>
+      </div>
+
+      <div className="mx-auto max-w-xl">
+        <label className="relative block">
+          <Search className="pointer-events-none absolute right-4 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" />
+          <input
+            value={librarySearch}
+            onChange={(event) => setLibrarySearch(event.target.value)}
+            placeholder="ابحث عن كتاب..."
+            className="w-full rounded-2xl border border-white/10 bg-white/[0.04] py-3 pr-12 pl-4 text-white outline-none transition-colors placeholder:text-gray-600 focus:border-amber-500/40"
+          />
+        </label>
+      </div>
+
+      {visibleEntries.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-10 text-center text-gray-500">
+          لم يتم العثور على كتاب مطابق للبحث.
+        </div>
+      ) : (
+      <>
+      <section className="space-y-4">
+        <div className="flex items-center justify-center gap-3">
+          <span className="h-px w-16 bg-gradient-to-l from-amber-500/50 to-transparent" />
+          <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-bold text-amber-300">المرجع الأعلى</span>
+          <span className="h-px w-16 bg-gradient-to-r from-amber-500/50 to-transparent" />
+        </div>
+        {featured && <BookCard entry={featured} large />}
+      </section>
+
+      <section className="space-y-5">
+        <h3 className="text-center text-lg font-bold text-gray-200">القوانين والأنظمة</h3>
+        <div className="grid grid-cols-1 justify-items-center gap-x-10 gap-y-12 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {regular.map((entry) => <BookCard key={entry.key} entry={entry} />)}
+        </div>
+      </section>
+      </>
+      )}
+    </div>
+  );
+}
+
+function BookReader({
+  book,
+  pages,
+  chapters,
+  articles,
+  loading,
+  onBack,
+}: {
+  book: Book;
+  pages: BookPage[];
+  chapters: ConstitutionChapter[];
+  articles: ConstitutionArticle[];
+  loading: boolean;
+  onBack: () => void;
+}) {
+  const [currentPage, setCurrentPage] = useState(0);
+  const [search, setSearch] = useState('');
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [showContents, setShowContents] = useState(false);
+
+  useEffect(() => {
+    setCurrentPage(0);
+    setSearch('');
+  }, [book.id]);
+
+  const safeBookId = String(book?.id ?? 'virtual-book');
+  const safeBookTitle = String(book?.title ?? 'كتاب');
+  const safeBookDescription = String(book?.description ?? '');
+  const safeBookCover = String(book?.cover_image_url ?? '');
+
+  const defaultItemLabel = (() => {
+    const normalized = normalizeBookTitle(safeBookTitle);
+    if (normalized.includes('عقوب')) return 'العقوبة';
+    if (normalized.includes('رول بلاي') || normalized.includes('شرطة') || normalized.includes('اسعاف') || normalized.includes('عصابات')) return 'القاعدة';
+    if (normalized.includes('ادارة')) return 'البند';
+    return 'المادة';
+  })();
+
+  const safePages = Array.isArray(pages) ? pages : [];
+  const safeChapters = Array.isArray(chapters) ? chapters : [];
+  const safeArticles = Array.isArray(articles) ? articles : [];
+
+  const constitutionPages = safeChapters.flatMap((chapter) => {
+    const chapterId = String(chapter?.id ?? '');
+    const chapterTitle = String(chapter?.title ?? 'قسم بدون عنوان');
+    const chapterDescription = String(chapter?.description ?? '');
+    const chapterOrder = Number(chapter?.sort_order) || 0;
+
+    const chapterArticles = safeArticles
+      .filter((article) => String(article?.chapter_id ?? '') === chapterId && article?.is_visible !== false)
+      .sort((a, b) => (Number(a?.sort_order) || 0) - (Number(b?.sort_order) || 0));
+
+    const generatedPages: BookPage[] = [];
+    if (chapterDescription.trim()) {
+      generatedPages.push({
+        id: `chapter-intro-${chapterId}`,
+        title: chapterTitle,
+        content: chapterDescription,
+        image_url: '',
+        page_number: 0,
+        sort_order: chapterOrder * 100,
+        created_at: String(chapter?.created_at ?? new Date().toISOString()),
+        book_id: String(book?.id ?? ''),
+      } as BookPage);
+    }
+
+    const articlesPerPage = 3;
+    for (let articleStart = 0; articleStart < chapterArticles.length; articleStart += articlesPerPage) {
+      const group = chapterArticles.slice(articleStart, articleStart + articlesPerPage);
+      const content = group.map((article, groupIndex) => {
+        const title = String(article?.title ?? '').trim();
+        const articleNumber = String(article?.article_number ?? articleStart + groupIndex + 1);
+        const articleContent = String(article?.content ?? '').trim();
+        const alreadyLabeled = /^(المادة|القاعدة|العقوبة|البند|الإجراء|التعليمات?)/.test(title);
+        const safeTitle = title || `${defaultItemLabel} ${articleNumber}`;
+        const heading = alreadyLabeled ? safeTitle : `${defaultItemLabel} ${articleNumber}: ${safeTitle}`;
+        return `${heading}
+${articleContent}`.trim();
+      }).join('\n\n────────────\n\n');
+
+      generatedPages.push({
+        id: `chapter-${chapterId}-${articleStart}`,
+        title: articleStart === 0 ? chapterTitle : `${chapterTitle} — تكملة`,
+        content,
+        image_url: '',
+        page_number: 0,
+        sort_order: chapterOrder * 100 + articleStart + 1,
+        created_at: String(chapter?.created_at ?? new Date().toISOString()),
+        book_id: safeBookId,
+      } as BookPage);
+    }
+    return generatedPages;
+  });
+
+  const normalizedExplicitPages = safePages.map((page, index) => ({
+    ...page,
+    id: String(page?.id ?? `page-${index}`),
+    title: String(page?.title ?? `صفحة ${index + 1}`),
+    content: String(page?.content ?? ''),
+    image_url: String(page?.image_url ?? ''),
+    page_number: Number(page?.page_number) || index + 1,
+    sort_order: Number(page?.sort_order) || index,
+    created_at: String(page?.created_at ?? new Date().toISOString()),
+    book_id: String(page?.book_id ?? safeBookId),
+  })) as BookPage[];
+
+  const coverPage: BookPage = {
+    id: `cover-${safeBookId}`,
+    title: safeBookTitle,
+    content: safeBookDescription,
+    image_url: safeBookCover,
+    page_number: 0,
+    sort_order: -1,
+    created_at: String(book?.created_at ?? new Date().toISOString()),
+    book_id: safeBookId,
+  };
+  const displayPages = [coverPage, ...normalizedExplicitPages, ...constitutionPages];
+  const safePage = Math.min(currentPage, Math.max(0, displayPages.length - 1));
+  const currentPageData = displayPages[safePage] || coverPage;
+  const isCover = safePage === 0;
+  const isFirstPage = safePage === 0;
+  const isLastPage = safePage >= displayPages.length - 1;
+  const readingProgress = displayPages.length <= 1
+    ? 0
+    : Math.round((safePage / (displayPages.length - 1)) * 100);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setCurrentPage((value) => Math.min(displayPages.length - 1, value + 1));
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setCurrentPage((value) => Math.max(0, value - 1));
+      }
+      if (event.key === 'Escape') onBack();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [displayPages.length, onBack]);
+
+  useEffect(() => {
+    if (currentPage !== safePage) setCurrentPage(safePage);
+  }, [currentPage, safePage]);
+
+
+  const searchablePages = displayPages
+    .map((page, index) => ({ page, index }))
+    .filter(({ page }) => {
+      const term = search.trim().toLowerCase();
+      if (!term) return true;
+      return `${String(page?.title ?? '')} ${String(page?.content ?? '')}`.toLowerCase().includes(term);
+    });
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[520px] items-center justify-center rounded-[2rem] border border-[#7a5b3b]/30 bg-[#2f2418]">
+        <div className="h-10 w-10 animate-spin rounded-full border-4 border-amber-500/20 border-t-amber-400" />
+      </div>
+    );
+  }
+
+  const renderInnerPage = () => {
+    if (isCover) {
+      return (
+        <div className="relative flex min-h-[520px] flex-col items-center justify-center overflow-hidden px-6 py-10 text-center">
+          {book.cover_image_url && (
+            <img
+              src={safeBookCover}
+              alt={safeBookTitle}
+              onError={(event) => {
+                event.currentTarget.onerror = null;
+                event.currentTarget.style.display = 'none';
+              }}
+              className="absolute inset-0 h-full w-full object-cover opacity-25"
+            />
+          )}
+          <div className="absolute inset-0 bg-gradient-to-b from-[#f8ecd8]/75 via-[#f4e4c8]/90 to-[#e3c18f]/95" />
+          <div className="relative z-10 flex max-w-xl flex-col items-center">
+            <div className="mb-6 rounded-full border border-[#8f6b3f]/30 bg-[#fff8ea]/60 px-4 py-2 text-sm font-bold text-[#694619]">النسخة الرسمية</div>
+            <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-full border border-[#8f6b3f]/30 bg-[#3a2818]/90 shadow-[0_0_40px_rgba(120,74,20,.18)]">
+              <Scale className="h-10 w-10 text-amber-300" />
+            </div>
+            <h3 className="text-3xl font-black text-[#3c2710] sm:text-4xl">{safeBookTitle}</h3>
+            <p className="mt-4 text-base leading-loose text-[#654a35] sm:text-lg">{safeBookDescription || 'لا يوجد وصف للكتاب.'}</p>
+            <button
+              onClick={() => displayPages.length > 1 && setCurrentPage(1)}
+              disabled={displayPages.length <= 1}
+              className="mt-8 rounded-full bg-[#7a4d18] px-7 py-3 font-bold text-[#fff6e8] shadow-lg transition-all hover:-translate-y-0.5 hover:bg-[#956127] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {displayPages.length > 1 ? 'ابدأ القراءة' : 'لا يوجد محتوى بعد'}
+            </button>
+          </div>
+        </div>
+      );
+    }
 
     return (
-      <div className="flex h-full min-h-[480px] flex-col px-5 py-8 text-right">
-        <div className="mb-4 flex items-center justify-between border-b border-[#9b7454]/25 pb-3 text-[11px] uppercase tracking-[0.25em] text-[#7a5b3b]">
-          <span>{isRight ? 'الصفحة اليمنى' : 'الصفحة اليسرى'}</span>
-          <span>{page.title || 'صفحة'}</span>
+      <div className="min-h-[520px] px-6 py-10 text-right sm:px-10">
+        <div className="mb-6 flex items-center justify-between border-b border-[#9b7454]/25 pb-4 text-sm text-[#7a5b3b]">
+          <span>{safeBookTitle}</span>
+          <span>صفحة {safePage + 1}</span>
         </div>
-        {page.image_url ? (
-          <img src={page.image_url} alt={page.title} className="mb-5 h-auto max-h-[220px] w-full rounded-2xl border border-[#9b7454]/25 object-cover" />
-        ) : null}
-        {page.content ? (
-          <div className="whitespace-pre-wrap text-[15px] leading-loose text-[#4d3420]">{page.content}</div>
+        <h3 className="mb-6 text-2xl font-black text-[#3c2710]">{currentPageData.title}</h3>
+        {currentPageData.image_url && (
+          <img
+            src={currentPageData.image_url}
+            alt={currentPageData.title}
+            onError={(event) => {
+              event.currentTarget.onerror = null;
+              event.currentTarget.style.display = 'none';
+            }}
+            className="mb-6 max-h-[260px] w-full rounded-2xl border border-[#9b7454]/25 object-cover"
+          />
+        )}
+        {currentPageData.content ? (
+          <div className="whitespace-pre-wrap text-[16px] leading-[2.15] text-[#4d3420]">{currentPageData.content}</div>
         ) : (
-          <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-[#9b7454]/25 bg-[#a06f3f]/10 text-[#7a5b3b]">
-            هذه الصفحة لا تحتوي على محتوى بعد.
-          </div>
+          <div className="flex h-48 items-center justify-center rounded-2xl border border-dashed border-[#9b7454]/30 bg-[#a06f3f]/10 text-[#7a5b3b]">هذه الصفحة لا تحتوي على محتوى بعد.</div>
         )}
       </div>
     );
   };
 
   return (
-    <div className="rounded-[2rem] border border-[#7a5b3b]/30 bg-[radial-gradient(circle_at_top,_rgba(255,236,209,0.95),_rgba(216,173,113,0.92))] p-3 shadow-[0_30px_80px_rgba(0,0,0,0.35)] md:p-4">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-full border border-[#9b7454]/20 bg-[#2f2418]/80 px-4 py-2 text-sm text-[#f8ebd7] backdrop-blur-sm">
-        <div className="flex items-center gap-2">
-          <Scale className="h-4 w-4 text-amber-400" />
-          <span className="font-semibold">{book.title}</span>
-        </div>
-        <div className="text-sm text-[#f2d8b0]">
-          صفحة {isCover ? 1 : currentPage} من {totalPages}
-        </div>
+    <div className="rounded-[2rem] border border-[#7a5b3b]/30 bg-[radial-gradient(circle_at_top,_rgba(255,236,209,0.96),_rgba(194,143,80,0.94))] p-3 shadow-[0_30px_80px_rgba(0,0,0,0.35)] sm:p-4">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#9b7454]/20 bg-[#2f2418]/90 px-4 py-3 text-[#f8ebd7]">
+        <div className="flex items-center gap-2 font-bold"><BookOpen className="h-4 w-4 text-amber-400" />{safeBookTitle}</div>
+        <div className="text-sm text-[#f2d8b0]">صفحة {safePage + 1} من {displayPages.length}</div>
       </div>
 
       <div
-        className="relative overflow-hidden rounded-[1.75rem] border border-[#8f6b3f]/25 bg-[linear-gradient(135deg,_rgba(240,221,181,0.95),_rgba(202,157,99,0.95))] p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06),_inset_0_0_80px_rgba(0,0,0,0.08)]"
+        className="relative overflow-hidden rounded-[1.5rem] border border-[#8f6b3f]/25 bg-[#f6ead7] shadow-[inset_0_0_70px_rgba(100,60,20,.10)]"
         onTouchStart={(event) => setTouchStartX(event.touches[0]?.clientX ?? null)}
         onTouchEnd={(event) => {
           if (touchStartX === null) return;
           const delta = (event.changedTouches[0]?.clientX ?? 0) - touchStartX;
-          if (delta > 50) {
-            goToPage(currentPage - 1, 'prev');
-          } else if (delta < -50) {
-            goToPage(currentPage + 1, 'next');
-          }
+          if (delta > 50 && !isFirstPage) setCurrentPage((value) => value - 1);
+          if (delta < -50 && !isLastPage) setCurrentPage((value) => value + 1);
           setTouchStartX(null);
         }}
       >
-        <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'linear-gradient(90deg, rgba(95,57,24,0.16) 0, rgba(95,57,24,0.16) 1px, transparent 1px, transparent 100%), linear-gradient(rgba(255,255,255,0.2) 0, rgba(255,255,255,0.2) 1px, transparent 1px, transparent 100%)', backgroundSize: '100% 100%, 18px 18px' }} />
-        <div className="absolute inset-0 opacity-20" style={{ background: 'radial-gradient(circle at 20% 20%, rgba(255,255,255,0.35), transparent 35%), radial-gradient(circle at 80% 30%, rgba(121,69,28,0.2), transparent 30%), radial-gradient(circle at 50% 100%, rgba(95,57,24,0.16), transparent 40%)' }} />
-
-        <div className="relative z-10 hidden items-stretch justify-center gap-3 py-2 md:flex md:gap-4">
-          <div className={`book-page book-page-left relative flex-1 overflow-hidden rounded-[1.2rem] border border-[#9b7454]/30 bg-[#f6ead7] shadow-[0_20px_45px_rgba(0,0,0,0.18)] md:min-h-[520px] ${getFlipClass('left')}`}>
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.35),_transparent_40%),linear-gradient(120deg,_rgba(95,57,24,0.08),_transparent_35%)]" />
-            <div className="absolute inset-0 opacity-[0.16]" style={{ backgroundImage: 'linear-gradient(90deg, rgba(95,57,24,0.25) 0, rgba(95,57,24,0.25) 1px, transparent 1px, transparent 100%), linear-gradient(rgba(255,255,255,0.4) 0, rgba(255,255,255,0.4) 1px, transparent 1px, transparent 100%)', backgroundSize: '100% 100%, 12px 12px' }} />
-            <div className="relative z-10 h-full">{renderPageContent(leftPageData, 'left')}</div>
-          </div>
-
-          <div className={`book-page book-page-right relative flex-1 overflow-hidden rounded-[1.2rem] border border-[#9b7454]/30 bg-[#f6ead7] shadow-[0_20px_45px_rgba(0,0,0,0.18)] md:min-h-[520px] ${getFlipClass('right')}`}>
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.35),_transparent_40%),linear-gradient(120deg,_rgba(95,57,24,0.08),_transparent_35%)]" />
-            <div className="absolute inset-0 opacity-[0.16]" style={{ backgroundImage: 'linear-gradient(90deg, rgba(95,57,24,0.25) 0, rgba(95,57,24,0.25) 1px, transparent 1px, transparent 100%), linear-gradient(rgba(255,255,255,0.4) 0, rgba(255,255,255,0.4) 1px, transparent 1px, transparent 100%)', backgroundSize: '100% 100%, 12px 12px' }} />
-            <div className="relative z-10 h-full">
-              {isAnimating && flipDirection === 'next' ? (
-                <>
-                  <div className="page-face page-face-front absolute inset-0">{renderPageContent(animatedFrontPage, 'right')}</div>
-                  <div className="page-face page-face-back absolute inset-0">{renderPageContent(animatedBackPage, 'right')}</div>
-                </>
-              ) : (
-                renderPageContent(rightPageData, 'right')
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="relative z-10 flex items-stretch justify-center py-2 md:hidden">
-          <div className={`book-page book-page-single relative w-full overflow-hidden rounded-[1.2rem] border border-[#9b7454]/30 bg-[#f6ead7] shadow-[0_20px_45px_rgba(0,0,0,0.18)] min-h-[520px] ${getFlipClass(currentPage === 0 ? 'left' : 'right')}`}>
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.35),_transparent_40%),linear-gradient(120deg,_rgba(95,57,24,0.08),_transparent_35%)]" />
-            <div className="absolute inset-0 opacity-[0.16]" style={{ backgroundImage: 'linear-gradient(90deg, rgba(95,57,24,0.25) 0, rgba(95,57,24,0.25) 1px, transparent 1px, transparent 100%), linear-gradient(rgba(255,255,255,0.4) 0, rgba(255,255,255,0.4) 1px, transparent 1px, transparent 100%)', backgroundSize: '100% 100%, 12px 12px' }} />
-            <div className="relative z-10 h-full">
-              {isAnimating && flipDirection === 'prev' ? (
-                <>
-                  <div className="page-face page-face-front absolute inset-0">{renderPageContent(animatedFrontPage, 'left')}</div>
-                  <div className="page-face page-face-back absolute inset-0">{renderPageContent(animatedBackPage, 'left')}</div>
-                </>
-              ) : (
-                renderPageContent(currentPage === 0 ? displayPages[0] : currentPageData, currentPage === 0 ? 'left' : 'right')
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 h-16 -translate-y-1/2 border-x border-[#8f6b3f]/20" />
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-24 bg-gradient-to-b from-[#4f341f]/10 to-transparent" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-24 bg-gradient-to-t from-[#4f341f]/10 to-transparent" />
+        <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'linear-gradient(rgba(95,57,24,.12) 1px, transparent 1px)', backgroundSize: '100% 18px' }} />
+        {!isCover && <img src="/library/server-logo.png" alt="" aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-[1] h-52 w-52 -translate-x-1/2 -translate-y-1/2 object-contain opacity-[0.045]" />}
+        <div className="relative z-10 animate-[fadeIn_.25s_ease-out]" key={`${book.id}-${safePage}`}>{renderInnerPage()}</div>
       </div>
 
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <button onClick={() => goToPage(currentPage - 1, 'prev')} disabled={isFirstPage || isAnimating} className="rounded-full border border-[#9b7454]/25 bg-[#2f2418]/80 px-4 py-2 text-sm text-[#f8ebd7] transition-all hover:border-amber-500/30 hover:text-white disabled:cursor-not-allowed disabled:opacity-40">
-            السابق
-          </button>
-          <button onClick={() => goToPage(currentPage + 1, 'next')} disabled={isLastPage || isAnimating} className="rounded-full border border-[#9b7454]/25 bg-[#2f2418]/80 px-4 py-2 text-sm text-[#f8ebd7] transition-all hover:border-amber-500/30 hover:text-white disabled:cursor-not-allowed disabled:opacity-40">
-            التالي
-          </button>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-2">
+          <button onClick={() => setCurrentPage((value) => Math.max(0, value - 1))} disabled={isFirstPage} className="rounded-full border border-[#9b7454]/25 bg-[#2f2418]/90 px-5 py-2.5 text-sm font-bold text-[#f8ebd7] transition hover:border-amber-400/40 disabled:opacity-40">السابق</button>
+          <button onClick={() => setCurrentPage((value) => Math.min(displayPages.length - 1, value + 1))} disabled={isLastPage} className="rounded-full border border-[#9b7454]/25 bg-[#2f2418]/90 px-5 py-2.5 text-sm font-bold text-[#f8ebd7] transition hover:border-amber-400/40 disabled:opacity-40">التالي</button>
         </div>
-        <div className="text-sm text-[#f2d8b0]">صفحة {isCover ? 1 : currentPage} من {totalPages}</div>
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ابحث داخل الكتاب..." className="w-full rounded-full border border-[#9b7454]/25 bg-[#2f2418]/90 px-4 py-2.5 text-sm text-[#f8ebd7] placeholder:text-[#c8aa82] outline-none focus:border-amber-400/50 sm:w-72" />
       </div>
 
-      <div className="mt-5 rounded-[1.25rem] border border-[#9b7454]/20 bg-[#2f2418]/60 p-4 text-[#f8ebd7]">
-        <h5 className="mb-3 text-sm font-semibold text-[#f2d8b0]">فهرس المحتويات</h5>
+      <div className="mt-4 rounded-2xl border border-[#9b7454]/20 bg-[#2f2418]/80 p-4">
+        <h4 className="mb-3 text-sm font-bold text-[#f2d8b0]">فهرس المحتويات</h4>
         <div className="flex flex-wrap gap-2">
-          {pages.map((page, index) => (
-            <button
-              key={page.id}
-              onClick={() => goToPage(index + 1, index + 1 > currentPage ? 'next' : 'prev')}
-              className="rounded-full border border-[#9b7454]/20 bg-[#f6ead7]/10 px-3 py-1.5 text-sm text-[#f6ead7] transition-all hover:border-amber-400/40 hover:bg-[#f6ead7]/20"
-            >
-              {page.title || `صفحة ${index + 1}`}
+          {searchablePages.map(({ page, index }) => (
+            <button key={`${page.id}-${index}`} onClick={() => setCurrentPage(index)} className={`rounded-full border px-3 py-1.5 text-sm transition ${index === safePage ? 'border-amber-400/50 bg-amber-500/20 text-amber-200' : 'border-[#9b7454]/20 bg-[#f6ead7]/10 text-[#f6ead7] hover:border-amber-400/40'}`}>
+              {index === 0 ? 'الغلاف' : page.title || `صفحة ${index + 1}`}
             </button>
           ))}
-          {chapters.map((chapter, index) => (
-            <button
-              key={`chapter-${chapter.id}`}
-              onClick={() => goToPage(pages.length + index + 1, pages.length + index + 1 > currentPage ? 'next' : 'prev')}
-              className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-sm text-[#f6ead7] transition-all hover:border-amber-400/40 hover:bg-amber-500/20"
-            >
-              {chapter.title}
-            </button>
-          ))}
-          {pages.length === 0 && chapters.length === 0 && (
-            <p className="text-sm text-[#e3cdad]">لا توجد صفحات مضافة بعد</p>
-          )}
+          {searchablePages.length === 0 && <p className="text-sm text-[#e3cdad]">لا توجد نتائج للبحث.</p>}
         </div>
       </div>
-
-      <style>{`
-        .page-face {
-          position: absolute;
-          inset: 0;
-          backface-visibility: hidden;
-          overflow: hidden;
-        }
-        .page-face-front { transform: rotateY(0deg); }
-        .page-face-back { transform: rotateY(180deg); }
-        .book-page-single { transform-origin: center center; }
-        .book-page::before {
-          content: '';
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(90deg, rgba(0,0,0,0.05) 0, transparent 12%, transparent 88%, rgba(0,0,0,0.05) 100%);
-          pointer-events: none;
-          z-index: 2;
-        }
-        .book-page::after {
-          content: '';
-          position: absolute;
-          inset: 0;
-          border-left: 2px solid rgba(95,57,24,.14);
-          pointer-events: none;
-          z-index: 3;
-        }
-        .book-page-left { transform-origin: right center; box-shadow: 18px 0 30px rgba(0,0,0,.16); }
-        .book-page-right { transform-origin: left center; box-shadow: -18px 0 30px rgba(0,0,0,.16); }
-        .page-turn-right { animation: pageTurnRight .78s cubic-bezier(.22,1,.36,1) both; }
-        .page-turn-left { animation: pageTurnLeft .78s cubic-bezier(.22,1,.36,1) both; }
-        @keyframes pageTurnLeft {
-          0% { transform: rotateY(0deg); box-shadow: -18px 0 30px rgba(0,0,0,.16); }
-          40% { transform: rotateY(-26deg); box-shadow: -8px 0 22px rgba(0,0,0,.14); }
-          100% { transform: rotateY(-96deg); box-shadow: -2px 0 12px rgba(0,0,0,.1); }
-        }
-        @keyframes pageTurnRight {
-          0% { transform: rotateY(0deg); box-shadow: 18px 0 30px rgba(0,0,0,.16); }
-          40% { transform: rotateY(26deg); box-shadow: 8px 0 22px rgba(0,0,0,.14); }
-          100% { transform: rotateY(96deg); box-shadow: 2px 0 12px rgba(0,0,0,.1); }
-        }
-      `}</style>
     </div>
   );
 }
@@ -1571,9 +1610,14 @@ function ContentBlockModal({ block, onClose, onSaved }: { block: ContentBlock | 
           </div>
         </Field>
         {mediaType !== 'none' && (
-          <Field label={mediaType === 'image' ? 'رفع صورة' : 'رفع فيديو'} hint="اختر الملف مباشرة من جهازك، وسيتم حفظه في Supabase Storage.">
-            <MediaUploader value={mediaUrl} onChange={setMediaUrl} kind={mediaType} />
+          <Field label={mediaType === 'image' ? 'رابط الصورة' : 'رابط الفيديو'} hint="ضع رابط مباشر للصورة أو الفيديو">
+            <input value={mediaUrl} onChange={(e) => setMediaUrl(e.target.value)} className="input" dir="ltr" placeholder="https://example.com/media.jpg" />
           </Field>
+        )}
+        {mediaType === 'image' && mediaUrl && (
+          <div className="rounded-lg overflow-hidden border border-white/10">
+            <img src={mediaUrl} alt="معاينة" className="w-full h-auto max-h-40 object-cover" />
+          </div>
         )}
       </div>
       <div className="flex gap-3 mt-6">
@@ -1588,6 +1632,59 @@ function ContentBlockModal({ block, onClose, onSaved }: { block: ContentBlock | 
 }
 
 // ============ BOOKS PANEL ============
+function parseImportedBookContent(rawText: string) {
+  type ImportedItem = { number: number; title: string; content: string };
+  type ImportedSection = { title: string; description: string; items: ImportedItem[] };
+
+  const lines = rawText.replace(/\r/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const sections: ImportedSection[] = [];
+  let currentSection: ImportedSection | null = null;
+  let currentItem: ImportedItem | null = null;
+
+  const ensureSection = () => {
+    if (!currentSection) {
+      currentSection = { title: 'المحتوى العام', description: '', items: [] };
+      sections.push(currentSection);
+    }
+    return currentSection;
+  };
+
+  for (const line of lines) {
+    const sectionMatch = line.match(/^(الباب|الفصل|القسم)\s*(.*)$/i);
+    const itemMatch = line.match(/^(المادة|القاعدة|العقوبة|البند|الإجراء|التعليمات?)\s*[（(]?([A-Za-zأ-ي0-9_-]+)?[）)]?\s*[:：\-]?\s*(.*)$/i);
+
+    if (sectionMatch) {
+      currentSection = { title: `${sectionMatch[1]} ${sectionMatch[2]}`.trim(), description: '', items: [] };
+      sections.push(currentSection);
+      currentItem = null;
+      continue;
+    }
+
+    if (itemMatch) {
+      const section = ensureSection();
+      const rawCode = itemMatch[2] || '';
+      const numericCode = /^\d+$/.test(rawCode) ? Number(rawCode) : null;
+      const number = numericCode ?? section.items.length + 1;
+      const rawTitle = itemMatch[3] || '';
+      const title = rawCode && numericCode === null
+        ? `${itemMatch[1]} (${rawCode})${rawTitle ? `: ${rawTitle}` : ''}`
+        : (rawTitle || `${itemMatch[1]} ${number}`);
+      currentItem = { number, title, content: '' };
+      section.items.push(currentItem);
+      continue;
+    }
+
+    if (currentItem) {
+      currentItem.content = currentItem.content ? `${currentItem.content}\n${line}` : line;
+    } else {
+      const section = ensureSection();
+      section.description = section.description ? `${section.description}\n${line}` : line;
+    }
+  }
+
+  return sections.filter((section) => section.title || section.description || section.items.length);
+}
+
 function BooksPanel() {
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
@@ -1598,42 +1695,35 @@ function BooksPanel() {
   const [showPageModal, setShowPageModal] = useState(false);
   const [showChapterModal, setShowChapterModal] = useState(false);
   const [showArticleModal, setShowArticleModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [editingPage, setEditingPage] = useState<BookPage | null>(null);
   const [editingChapter, setEditingChapter] = useState<ConstitutionChapter | null>(null);
   const [editingArticle, setEditingArticle] = useState<ConstitutionArticle | null>(null);
   const [previewBook, setPreviewBook] = useState<Book | null>(null);
   const [previewPages, setPreviewPages] = useState<BookPage[]>([]);
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [importText, setImportText] = useState('');
-  const [importing, setImporting] = useState(false);
+  const [syncingLibrary, setSyncingLibrary] = useState(false);
+  const [cleaningLibrary, setCleaningLibrary] = useState(false);
+  const [bookSearch, setBookSearch] = useState('');
+  const [bookVisibilityFilter, setBookVisibilityFilter] = useState<'all' | 'visible' | 'hidden'>('all');
+  const [restoringBackup, setRestoringBackup] = useState(false);
 
   const loadBooks = useCallback(async () => {
-    const { data } = await supabase.from('books').select('*').order('sort_order', { ascending: true });
+    const { data, error } = await supabase.from('books').select('*').order('sort_order', { ascending: true });
+    if (error) return;
     const loadedBooks = (data || []) as Book[];
     setBooks(loadedBooks);
-    if (!selectedBookId && loadedBooks.length > 0) {
-      setSelectedBookId(loadedBooks[0].id);
-    } else if (selectedBookId && !loadedBooks.some((book) => book.id === selectedBookId)) {
-      setSelectedBookId(loadedBooks[0]?.id || null);
-    }
-  }, [selectedBookId]);
+    setSelectedBookId((current) => current && loadedBooks.some((book) => book.id === current) ? current : loadedBooks[0]?.id || null);
+  }, []);
 
   const loadPages = useCallback(async (bookId: string | null) => {
-    if (!bookId) {
-      setPages([]);
-      return;
-    }
+    if (!bookId) { setPages([]); return; }
     const { data } = await supabase.from('book_pages').select('*').eq('book_id', bookId).order('sort_order', { ascending: true });
     setPages((data || []) as BookPage[]);
   }, []);
 
-  const loadConstitutionContent = useCallback(async (bookId: string | null) => {
-    if (!bookId) {
-      setChapters([]);
-      setArticles([]);
-      return;
-    }
+  const loadBookContent = useCallback(async (bookId: string | null) => {
+    if (!bookId) { setChapters([]); setArticles([]); return; }
     const [{ data: chapterData }, { data: articleData }] = await Promise.all([
       supabase.from('constitution_chapters').select('*').eq('book_id', bookId).order('sort_order', { ascending: true }),
       supabase.from('constitution_articles').select('*').eq('book_id', bookId).order('sort_order', { ascending: true }),
@@ -1642,90 +1732,32 @@ function BooksPanel() {
     setArticles((articleData || []) as ConstitutionArticle[]);
   }, []);
 
-  useEffect(() => { loadBooks(); }, [loadBooks]);
-  useEffect(() => { void loadPages(selectedBookId); }, [selectedBookId, loadPages]);
-  useEffect(() => { void loadConstitutionContent(selectedBookId); }, [selectedBookId, loadConstitutionContent]);
+  useEffect(() => { void loadBooks(); }, [loadBooks]);
+  useEffect(() => { void loadPages(selectedBookId); void loadBookContent(selectedBookId); }, [selectedBookId, loadPages, loadBookContent]);
 
   async function removeBook(book: Book) {
-    if (!window.confirm(`هل تريد حذف الكتاب "${book.title}"؟`)) return;
+    if (!window.confirm(`هل تريد حذف الكتاب «${book.title}» وكل محتواه؟`)) return;
     await supabase.from('books').delete().eq('id', book.id);
     setPreviewBook(null);
-    setPreviewPages([]);
     await loadBooks();
   }
 
   async function removePage(page: BookPage) {
-    if (!window.confirm(`هل تريد حذف الصفحة "${page.title}"؟`)) return;
+    if (!window.confirm(`هل تريد حذف الصفحة «${page.title}»؟`)) return;
     await supabase.from('book_pages').delete().eq('id', page.id);
-    if (selectedBookId) await loadPages(selectedBookId);
+    await loadPages(selectedBookId);
   }
 
   async function removeChapter(chapter: ConstitutionChapter) {
-    if (!window.confirm(`هل تريد حذف الفصل "${chapter.title}"؟`)) return;
+    if (!window.confirm(`هل تريد حذف القسم «${chapter.title}»؟`)) return;
     await supabase.from('constitution_chapters').delete().eq('id', chapter.id);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
+    await loadBookContent(selectedBookId);
   }
 
   async function removeArticle(article: ConstitutionArticle) {
-    if (!window.confirm(`هل تريد حذف المادة "${article.title}"؟`)) return;
+    if (!window.confirm(`هل تريد حذف العنصر «${article.title}»؟`)) return;
     await supabase.from('constitution_articles').delete().eq('id', article.id);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
-  }
-
-  async function moveBook(bookId: string, direction: -1 | 1) {
-    const sorted = [...books].sort((a, b) => a.sort_order - b.sort_order);
-    const index = sorted.findIndex((item) => item.id === bookId);
-    const swapIndex = index + direction;
-    if (index < 0 || swapIndex < 0 || swapIndex >= sorted.length) return;
-    const current = sorted[index];
-    const target = sorted[swapIndex];
-    await Promise.all([
-      supabase.from('books').update({ sort_order: target.sort_order }).eq('id', current.id),
-      supabase.from('books').update({ sort_order: current.sort_order }).eq('id', target.id),
-    ]);
-    await loadBooks();
-  }
-
-  async function movePage(pageId: string, direction: -1 | 1) {
-    const sorted = [...pages].sort((a, b) => a.sort_order - b.sort_order);
-    const index = sorted.findIndex((item) => item.id === pageId);
-    const swapIndex = index + direction;
-    if (index < 0 || swapIndex < 0 || swapIndex >= sorted.length) return;
-    const current = sorted[index];
-    const target = sorted[swapIndex];
-    await Promise.all([
-      supabase.from('book_pages').update({ sort_order: target.sort_order }).eq('id', current.id),
-      supabase.from('book_pages').update({ sort_order: current.sort_order }).eq('id', target.id),
-    ]);
-    if (selectedBookId) await loadPages(selectedBookId);
-  }
-
-  async function moveChapter(chapterId: string, direction: -1 | 1) {
-    const sorted = [...chapters].sort((a, b) => a.sort_order - b.sort_order);
-    const index = sorted.findIndex((item) => item.id === chapterId);
-    const swapIndex = index + direction;
-    if (index < 0 || swapIndex < 0 || swapIndex >= sorted.length) return;
-    const current = sorted[index];
-    const target = sorted[swapIndex];
-    await Promise.all([
-      supabase.from('constitution_chapters').update({ sort_order: target.sort_order }).eq('id', current.id),
-      supabase.from('constitution_chapters').update({ sort_order: current.sort_order }).eq('id', target.id),
-    ]);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
-  }
-
-  async function moveArticle(articleId: string, direction: -1 | 1) {
-    const sorted = [...articles].sort((a, b) => a.sort_order - b.sort_order);
-    const index = sorted.findIndex((item) => item.id === articleId);
-    const swapIndex = index + direction;
-    if (index < 0 || swapIndex < 0 || swapIndex >= sorted.length) return;
-    const current = sorted[index];
-    const target = sorted[swapIndex];
-    await Promise.all([
-      supabase.from('constitution_articles').update({ sort_order: target.sort_order }).eq('id', current.id),
-      supabase.from('constitution_articles').update({ sort_order: current.sort_order }).eq('id', target.id),
-    ]);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
+    await loadBookContent(selectedBookId);
   }
 
   async function toggleVisible(book: Book) {
@@ -1735,12 +1767,12 @@ function BooksPanel() {
 
   async function toggleChapterVisible(chapter: ConstitutionChapter) {
     await supabase.from('constitution_chapters').update({ is_visible: !chapter.is_visible }).eq('id', chapter.id);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
+    await loadBookContent(selectedBookId);
   }
 
   async function toggleArticleVisible(article: ConstitutionArticle) {
     await supabase.from('constitution_articles').update({ is_visible: !article.is_visible }).eq('id', article.id);
-    if (selectedBookId) await loadConstitutionContent(selectedBookId);
+    await loadBookContent(selectedBookId);
   }
 
   async function openPreviewBook(book: Book) {
@@ -1749,326 +1781,708 @@ function BooksPanel() {
     setPreviewPages((data || []) as BookPage[]);
   }
 
-  function parseConstitutionText(rawText: string) {
-    const lines = rawText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const parsed: Array<{ title: string; description: string; articles: Array<{ number: number; title: string; content: string }> }> = [];
-    let currentChapter: { title: string; description: string; articles: Array<{ number: number; title: string; content: string }> } | null = null;
-    let currentArticle: { number: number; title: string; content: string } | null = null;
-    let introLines: string[] = [];
-
-    const flushArticle = () => {
-      if (currentChapter && currentArticle) currentChapter.articles.push({ ...currentArticle, content: currentArticle.content.trim() });
-      currentArticle = null;
-    };
-    const flushChapter = () => {
-      flushArticle();
-      if (currentChapter) parsed.push(currentChapter);
-      currentChapter = null;
-    };
-
-    for (const line of lines) {
-      const chapterMatch = line.match(/^(الباب|الفصل)\s+.+$/);
-      const articleMatch = line.match(/^المادة\s*[（(]?(\d+)[）)]?\s*[:：-]?\s*(.*)$/);
-
-      if (chapterMatch) {
-        flushChapter();
-        currentChapter = { title: line, description: '', articles: [] };
-        continue;
+  async function prepareImportForAllBooks() {
+    setSyncingLibrary(true);
+    try {
+      const { data: currentRows, error: currentError } = await supabase.from('books').select('*').order('sort_order', { ascending: true });
+      if (currentError) throw currentError;
+      const currentBooks = (currentRows || []) as Book[];
+      const existingTitles = currentBooks.map((book) => normalizeBookTitle(book.title));
+      const missing = LIBRARY_CATALOG.filter((item) => !item.aliases.some((alias) => existingTitles.includes(normalizeBookTitle(alias))));
+      if (missing.length) {
+        const highestSortOrder = currentBooks.reduce((max, book) => Math.max(max, Number(book.sort_order) || 0), -1);
+        const { error: insertError } = await supabase.from('books').insert(missing.map((item, index) => ({
+          title: item.title,
+          description: item.description,
+          cover_image_url: item.cover,
+          icon: 'BookOpen',
+          is_visible: true,
+          sort_order: highestSortOrder + index + 1,
+        })));
+        if (insertError) throw insertError;
       }
-      if (articleMatch) {
-        if (!currentChapter) {
-          currentChapter = { title: introLines.length ? 'المقدمة والأحكام التمهيدية' : 'أحكام عامة', description: introLines.join('\n'), articles: [] };
-          introLines = [];
-        }
-        flushArticle();
-        currentArticle = { number: Number(articleMatch[1]), title: articleMatch[2] || `المادة ${articleMatch[1]}`, content: '' };
-        continue;
-      }
-      if (currentArticle) {
-        currentArticle.content += `${currentArticle.content ? '\n' : ''}${line}`;
-      } else if (currentChapter) {
-        currentChapter.description += `${currentChapter.description ? '\n' : ''}${line}`;
-      } else {
-        introLines.push(line);
-      }
+      const { data: refreshed, error: refreshError } = await supabase.from('books').select('*').order('sort_order', { ascending: true });
+      if (refreshError) throw refreshError;
+      const nextBooks = (refreshed || []) as Book[];
+      setBooks(nextBooks);
+      setSelectedBookId((current) => current && nextBooks.some((book) => book.id === current) ? current : nextBooks[0]?.id || null);
+      setShowImportModal(true);
+    } catch (error) {
+      alert(`تعذر تجهيز قائمة الاستيراد: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setSyncingLibrary(false);
     }
-    flushChapter();
-    if (!parsed.length && introLines.length) parsed.push({ title: 'المقدمة', description: introLines.join('\n'), articles: [] });
-    return parsed;
   }
 
-  async function importConstitution() {
-    if (!selectedBookId || !importText.trim()) return;
-    const parsed = parseConstitutionText(importText);
-    const articleCount = parsed.reduce((total, chapter) => total + chapter.articles.length, 0);
-    if (!parsed.length || articleCount === 0) {
-      alert('لم أتمكن من اكتشاف الأبواب والمواد. تأكد أن العناوين تبدأ بـ «الباب» وأن المواد تبدأ بـ «المادة (1)».');
+  function exportSelectedBook() {
+    if (!selectedBook) return;
+    const selectedChapters = chapters.filter((chapter) => chapter.book_id === selectedBook.id);
+    const selectedArticles = articles.filter((article) => article.book_id === selectedBook.id);
+    const blocks = selectedChapters.map((chapter) => {
+      const chapterItems = selectedArticles
+        .filter((article) => article.chapter_id === chapter.id)
+        .sort((a, b) => Number(a.sort_order) - Number(b.sort_order))
+        .map((article) => `${article.title}
+${article.content}`.trim())
+        .join('\n\n');
+      return `${chapter.title}
+${chapter.description || ''}
+
+${chapterItems}`.trim();
+    });
+    const pageBlocks = pages.map((page) => `${page.title}
+${page.content || ''}`.trim());
+    const content = [`${selectedBook.title}
+${selectedBook.description || ''}`.trim(), ...pageBlocks, ...blocks].filter(Boolean).join('\n\n====================\n\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${selectedBook.title.replace(/[\/:*?"<>|]/g, '-')}.txt`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function ensureLibraryBooks() {
+    setSyncingLibrary(true);
+    try {
+      const existingTitles = books.map((book) => normalizeBookTitle(book.title));
+      const missing = LIBRARY_CATALOG.filter((item) => !item.aliases.some((alias) => existingTitles.includes(normalizeBookTitle(alias))));
+      if (!missing.length) {
+        alert('جميع كتب المكتبة الأساسية موجودة بالفعل.');
+        return;
+      }
+      const highestSortOrder = books.reduce((max, book) => Math.max(max, Number(book.sort_order) || 0), -1);
+      const rows = missing.map((item, index) => ({
+        title: item.title,
+        description: item.description,
+        cover_image_url: item.cover,
+        icon: 'BookOpen',
+        is_visible: true,
+        sort_order: highestSortOrder + index + 1,
+      }));
+      const { error } = await supabase.from('books').insert(rows);
+      if (error) throw error;
+      await loadBooks();
+    } catch (error) {
+      alert(`تعذر تجهيز الكتب: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setSyncingLibrary(false);
+    }
+  }
+
+  async function cleanDuplicateLibraryBooks() {
+    const catalogForTitle = (title: string) => {
+      const normalized = normalizeBookTitle(title);
+      if (normalized === normalizeBookTitle('عقوبات الدستور')) return LIBRARY_CATALOG.find((item) => item.key === 'penalties') || null;
+      return LIBRARY_CATALOG.find((item) => item.aliases.some((alias) => normalizeBookTitle(alias) === normalized)) || null;
+    };
+
+    const groups = new Map<string, Book[]>();
+    for (const book of books) {
+      const catalog = catalogForTitle(book.title);
+      const groupKey = catalog ? `catalog:${catalog.key}` : `custom:${normalizeBookTitle(book.title)}`;
+      groups.set(groupKey, [...(groups.get(groupKey) || []), book]);
+    }
+
+    const duplicateGroups = [...groups.entries()].filter(([, group]) => group.length > 1 || group.some((book) => normalizeBookTitle(book.title) === normalizeBookTitle('عقوبات الدستور')));
+    if (!duplicateGroups.length) {
+      alert('لا توجد كتب مكررة تحتاج إلى تنظيف.');
       return;
     }
-    if (!window.confirm(`سيتم استبدال الأبواب والمواد الحالية بـ ${parsed.length} باب و${articleCount} مادة. هل تريد المتابعة؟`)) return;
 
-    setImporting(true);
+    const duplicatesCount = duplicateGroups.reduce((sum, [, group]) => sum + Math.max(0, group.length - 1), 0);
+    if (!window.confirm(`سيتم دمج محتوى ${duplicatesCount || 1} كتاب مكرر وحذف النسخ الزائدة. لن يتم حذف الصفحات أو المواد. هل تريد المتابعة؟`)) return;
+
+    setCleaningLibrary(true);
     try {
-      const { error: deleteArticlesError } = await supabase.from('constitution_articles').delete().eq('book_id', selectedBookId);
-      if (deleteArticlesError) throw deleteArticlesError;
-      const { error: deleteChaptersError } = await supabase.from('constitution_chapters').delete().eq('book_id', selectedBookId);
-      if (deleteChaptersError) throw deleteChaptersError;
+      for (const [groupKey, group] of duplicateGroups) {
+        const catalogKey = groupKey.startsWith('catalog:') ? groupKey.slice('catalog:'.length) : '';
+        const catalog = LIBRARY_CATALOG.find((item) => item.key === catalogKey);
+        const sorted = [...group].sort((a, b) => {
+          const aExact = catalog && normalizeBookTitle(a.title) === normalizeBookTitle(catalog.title) ? 1 : 0;
+          const bExact = catalog && normalizeBookTitle(b.title) === normalizeBookTitle(catalog.title) ? 1 : 0;
+          return bExact - aExact || Number(a.sort_order) - Number(b.sort_order);
+        });
+        let canonical = sorted[0];
 
-      for (let chapterIndex = 0; chapterIndex < parsed.length; chapterIndex += 1) {
-        const chapter = parsed[chapterIndex];
-        const { data: createdChapter, error: chapterError } = await supabase
-          .from('constitution_chapters')
-          .insert({ book_id: selectedBookId, title: chapter.title, description: chapter.description, sort_order: chapterIndex + 1, is_visible: true })
-          .select('*')
-          .single();
-        if (chapterError || !createdChapter) throw chapterError || new Error('تعذر إنشاء الباب');
+        if (catalog && normalizeBookTitle(canonical.title) === normalizeBookTitle('عقوبات الدستور')) {
+          const { data: created, error } = await supabase.from('books').insert({
+            title: catalog.title,
+            description: catalog.description,
+            cover_image_url: catalog.cover,
+            icon: 'BookOpen',
+            is_visible: true,
+            sort_order: canonical.sort_order,
+          }).select('*').single();
+          if (error || !created) throw error || new Error('تعذر إنشاء الكتاب الأساسي');
+          canonical = created as Book;
+        } else if (catalog && normalizeBookTitle(canonical.title) !== normalizeBookTitle(catalog.title)) {
+          await supabase.from('books').update({
+            title: catalog.title,
+            description: canonical.description || catalog.description,
+            cover_image_url: canonical.cover_image_url || catalog.cover,
+          }).eq('id', canonical.id);
+        }
 
-        if (chapter.articles.length) {
-          const rows = chapter.articles.map((article, articleIndex) => ({
-            book_id: selectedBookId,
-            chapter_id: createdChapter.id,
-            article_number: article.number,
+        const duplicates = sorted.filter((book) => book.id !== canonical.id);
+        for (const duplicate of duplicates) {
+          const [{ data: pageRows }, { data: chapterRows }, { data: articleRows }] = await Promise.all([
+            supabase.from('book_pages').select('id, sort_order').eq('book_id', duplicate.id).order('sort_order'),
+            supabase.from('constitution_chapters').select('id, sort_order').eq('book_id', duplicate.id).order('sort_order'),
+            supabase.from('constitution_articles').select('id, sort_order').eq('book_id', duplicate.id).order('sort_order'),
+          ]);
+
+          const [{ data: lastPage }, { data: lastChapter }, { data: lastArticle }] = await Promise.all([
+            supabase.from('book_pages').select('sort_order').eq('book_id', canonical.id).order('sort_order', { ascending: false }).limit(1).maybeSingle(),
+            supabase.from('constitution_chapters').select('sort_order').eq('book_id', canonical.id).order('sort_order', { ascending: false }).limit(1).maybeSingle(),
+            supabase.from('constitution_articles').select('sort_order').eq('book_id', canonical.id).order('sort_order', { ascending: false }).limit(1).maybeSingle(),
+          ]);
+
+          const pageOffset = lastPage ? Number(lastPage.sort_order) + 1 : 0;
+          const chapterOffset = lastChapter ? Number(lastChapter.sort_order) + 1 : 0;
+          const articleOffset = lastArticle ? Number(lastArticle.sort_order) + 1 : 0;
+
+          for (let i = 0; i < (pageRows || []).length; i += 1) await supabase.from('book_pages').update({ book_id: canonical.id, sort_order: pageOffset + i }).eq('id', pageRows![i].id);
+          for (let i = 0; i < (chapterRows || []).length; i += 1) await supabase.from('constitution_chapters').update({ book_id: canonical.id, sort_order: chapterOffset + i }).eq('id', chapterRows![i].id);
+          for (let i = 0; i < (articleRows || []).length; i += 1) await supabase.from('constitution_articles').update({ book_id: canonical.id, sort_order: articleOffset + i }).eq('id', articleRows![i].id);
+          await supabase.from('books').delete().eq('id', duplicate.id);
+        }
+      }
+      await loadBooks();
+      alert('تم تنظيف الكتب المكررة ودمج محتواها بنجاح.');
+    } catch (error) {
+      alert(`تعذر تنظيف الكتب: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setCleaningLibrary(false);
+    }
+  }
+
+
+
+  async function duplicateBook(book: Book) {
+    if (!window.confirm(`إنشاء نسخة من الكتاب «${book.title}» مع جميع صفحاته ومحتواه؟`)) return;
+    try {
+      const [{ data: pageRows, error: pageError }, { data: chapterRows, error: chapterError }, { data: articleRows, error: articleError }] = await Promise.all([
+        supabase.from('book_pages').select('*').eq('book_id', book.id).order('sort_order', { ascending: true }),
+        supabase.from('constitution_chapters').select('*').eq('book_id', book.id).order('sort_order', { ascending: true }),
+        supabase.from('constitution_articles').select('*').eq('book_id', book.id).order('sort_order', { ascending: true }),
+      ]);
+      const firstError = pageError || chapterError || articleError;
+      if (firstError) throw firstError;
+
+      const highestOrder = books.reduce((max, current) => Math.max(max, Number(current.sort_order) || 0), -1);
+      const { data: createdBook, error: createError } = await supabase.from('books').insert({
+        title: `${book.title} - نسخة`,
+        description: book.description || '',
+        cover_image_url: book.cover_image_url || '',
+        icon: book.icon || 'BookOpen',
+        is_visible: false,
+        sort_order: highestOrder + 1,
+      }).select('*').single();
+      if (createError || !createdBook) throw createError || new Error('تعذر إنشاء نسخة الكتاب');
+
+      if ((pageRows || []).length) {
+        const { error } = await supabase.from('book_pages').insert((pageRows || []).map((page) => ({
+          book_id: createdBook.id,
+          title: page.title,
+          content: page.content,
+          image_url: page.image_url,
+          page_number: page.page_number,
+          sort_order: page.sort_order,
+        })));
+        if (error) throw error;
+      }
+
+      const chapterIdMap = new Map<string, string>();
+      for (const chapter of chapterRows || []) {
+        const { data: createdChapter, error } = await supabase.from('constitution_chapters').insert({
+          book_id: createdBook.id,
+          title: chapter.title,
+          description: chapter.description,
+          sort_order: chapter.sort_order,
+          is_visible: chapter.is_visible,
+        }).select('*').single();
+        if (error || !createdChapter) throw error || new Error('تعذر نسخ قسم');
+        chapterIdMap.set(chapter.id, createdChapter.id);
+      }
+
+      if ((articleRows || []).length) {
+        const rows = (articleRows || [])
+          .filter((article) => chapterIdMap.has(article.chapter_id))
+          .map((article) => ({
+            book_id: createdBook.id,
+            chapter_id: chapterIdMap.get(article.chapter_id),
+            article_number: article.article_number,
             title: article.title,
             content: article.content,
-            sort_order: articleIndex + 1,
-            is_visible: true,
+            sort_order: article.sort_order,
+            is_visible: article.is_visible,
           }));
-          const { error: articlesError } = await supabase.from('constitution_articles').insert(rows);
-          if (articlesError) throw articlesError;
+        if (rows.length) {
+          const { error } = await supabase.from('constitution_articles').insert(rows);
+          if (error) throw error;
         }
       }
 
-      await loadConstitutionContent(selectedBookId);
-      setShowImportModal(false);
-      setImportText('');
-      alert(`تم استيراد ${parsed.length} باب و${articleCount} مادة بنجاح.`);
+      await loadBooks();
+      setSelectedBookId(createdBook.id);
+      alert('تم إنشاء نسخة مخفية من الكتاب بنجاح.');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'حدث خطأ غير معروف';
-      alert(`تعذر استيراد الدستور: ${message}`);
-    } finally {
-      setImporting(false);
+      alert(`تعذر نسخ الكتاب: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
     }
   }
+
+  async function restoreLibraryBackup(file: File) {
+    setRestoringBackup(true);
+    try {
+      const raw = await file.text();
+      const payload = JSON.parse(raw) as {
+        books?: Book[];
+        book_pages?: BookPage[];
+        constitution_chapters?: ConstitutionChapter[];
+        constitution_articles?: ConstitutionArticle[];
+      };
+      if (!Array.isArray(payload.books)) throw new Error('ملف النسخة الاحتياطية غير صالح.');
+      if (!window.confirm(`سيتم استبدال المكتبة الحالية واستعادة ${payload.books.length} كتاب. هل تريد المتابعة؟`)) return;
+
+      const { error: deleteBooksError } = await supabase.from('books').delete().not('id', 'is', null);
+      if (deleteBooksError) throw deleteBooksError;
+
+      const bookIdMap = new Map<string, string>();
+      const chapterIdMap = new Map<string, string>();
+
+      for (const book of payload.books) {
+        const { data: createdBook, error } = await supabase.from('books').insert({
+          title: book.title,
+          description: book.description || '',
+          cover_image_url: book.cover_image_url || '',
+          icon: book.icon || 'BookOpen',
+          is_visible: book.is_visible ?? true,
+          sort_order: book.sort_order ?? 0,
+        }).select('*').single();
+        if (error || !createdBook) throw error || new Error('تعذر استعادة كتاب');
+        bookIdMap.set(book.id, createdBook.id);
+      }
+
+      const pageRows = (payload.book_pages || [])
+        .filter((page) => bookIdMap.has(page.book_id))
+        .map((page) => ({
+          book_id: bookIdMap.get(page.book_id),
+          title: page.title,
+          content: page.content,
+          image_url: page.image_url,
+          page_number: page.page_number,
+          sort_order: page.sort_order,
+        }));
+      if (pageRows.length) {
+        const { error } = await supabase.from('book_pages').insert(pageRows);
+        if (error) throw error;
+      }
+
+      for (const chapter of payload.constitution_chapters || []) {
+        const mappedBookId = bookIdMap.get(chapter.book_id);
+        if (!mappedBookId) continue;
+        const { data: createdChapter, error } = await supabase.from('constitution_chapters').insert({
+          book_id: mappedBookId,
+          title: chapter.title,
+          description: chapter.description || '',
+          sort_order: chapter.sort_order,
+          is_visible: chapter.is_visible ?? true,
+        }).select('*').single();
+        if (error || !createdChapter) throw error || new Error('تعذر استعادة قسم');
+        chapterIdMap.set(chapter.id, createdChapter.id);
+      }
+
+      const articleRows = (payload.constitution_articles || [])
+        .filter((article) => bookIdMap.has(article.book_id) && chapterIdMap.has(article.chapter_id))
+        .map((article) => ({
+          book_id: bookIdMap.get(article.book_id),
+          chapter_id: chapterIdMap.get(article.chapter_id),
+          article_number: article.article_number,
+          title: article.title,
+          content: article.content,
+          sort_order: article.sort_order,
+          is_visible: article.is_visible ?? true,
+        }));
+      if (articleRows.length) {
+        const { error } = await supabase.from('constitution_articles').insert(articleRows);
+        if (error) throw error;
+      }
+
+      await loadBooks();
+      alert('تمت استعادة المكتبة بنجاح.');
+    } catch (error) {
+      alert(`تعذر استعادة النسخة الاحتياطية: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setRestoringBackup(false);
+    }
+  }
+
+  async function moveBook(book: Book, direction: -1 | 1) {
+    const ordered = [...books].sort((a, b) => Number(a.sort_order) - Number(b.sort_order));
+    const index = ordered.findIndex((item) => item.id === book.id);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= ordered.length) return;
+    const target = ordered[targetIndex];
+    const currentOrder = Number(book.sort_order) || index;
+    const targetOrder = Number(target.sort_order) || targetIndex;
+    await Promise.all([
+      supabase.from('books').update({ sort_order: targetOrder }).eq('id', book.id),
+      supabase.from('books').update({ sort_order: currentOrder }).eq('id', target.id),
+    ]);
+    await loadBooks();
+  }
+
+  async function exportLibraryBackup() {
+    try {
+      const [{ data: bookRows, error: bookError }, { data: pageRows, error: pageError }, { data: chapterRows, error: chapterError }, { data: articleRows, error: articleError }] = await Promise.all([
+        supabase.from('books').select('*').order('sort_order', { ascending: true }),
+        supabase.from('book_pages').select('*').order('sort_order', { ascending: true }),
+        supabase.from('constitution_chapters').select('*').order('sort_order', { ascending: true }),
+        supabase.from('constitution_articles').select('*').order('sort_order', { ascending: true }),
+      ]);
+      const firstError = bookError || pageError || chapterError || articleError;
+      if (firstError) throw firstError;
+      const payload = {
+        exported_at: new Date().toISOString(),
+        books: bookRows || [],
+        book_pages: pageRows || [],
+        constitution_chapters: chapterRows || [],
+        constitution_articles: articleRows || [],
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `sandy-library-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(`تعذر تصدير النسخة الاحتياطية: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    }
+  }
+
+  const normalizedBookSearch = bookSearch.trim().toLowerCase();
+  const filteredBooks = books.filter((book) => {
+    const matchesSearch = !normalizedBookSearch
+      || `${book.title} ${book.description || ''}`.toLowerCase().includes(normalizedBookSearch);
+    const matchesVisibility = bookVisibilityFilter === 'all'
+      || (bookVisibilityFilter === 'visible' ? book.is_visible : !book.is_visible);
+    return matchesSearch && matchesVisibility;
+  });
 
   const selectedBook = books.find((book) => book.id === selectedBookId) || null;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-bold text-white">الكتب والدستور</h2>
-          <p className="text-sm text-gray-500 mt-1">أنشئ كتبًا دستورية، أضف صفحات، وابدأ معاينة القراءة مباشرة من اللوحة.</p>
+          <h2 className="text-lg font-bold text-white">إدارة المكتبة والكتب</h2>
+          <p className="mt-1 text-sm text-gray-500">كل كتاب مستقل بمحتواه، ويمكنك اختيار أي كتاب للاستيراد إليه.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => setShowImportModal(true)} disabled={!selectedBookId} className="flex items-center gap-2 px-4 py-2.5 border border-amber-500/30 bg-amber-500/10 text-amber-400 font-semibold rounded-lg hover:bg-amber-500/20 disabled:opacity-40">
-            <FileText className="w-4 h-4" /> استيراد دستور
+          <button onClick={() => void exportLibraryBackup()} disabled={books.length === 0} className="flex items-center gap-2 rounded-lg border border-sky-500/20 bg-sky-500/10 px-4 py-2.5 font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-40">
+            <Download className="h-4 w-4" /> نسخة احتياطية
           </button>
-          <button onClick={() => { setEditingBook(null); setShowBookModal(true); }} className="flex items-center gap-2 px-4 py-2.5 bg-amber-500 text-black font-semibold rounded-lg hover:bg-amber-600 transition-colors">
-            <Plus className="w-4 h-4" /> كتاب جديد
+          <label className={`flex cursor-pointer items-center gap-2 rounded-lg border border-violet-500/20 bg-violet-500/10 px-4 py-2.5 font-semibold text-violet-300 transition-colors hover:bg-violet-500/20 ${restoringBackup ? 'pointer-events-none opacity-40' : ''}`}>
+            <Upload className="h-4 w-4" /> {restoringBackup ? 'جاري الاستعادة...' : 'استعادة نسخة'}
+            <input
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void restoreLibraryBackup(file);
+                event.currentTarget.value = '';
+              }}
+            />
+          </label>
+          <button onClick={() => void cleanDuplicateLibraryBooks()} disabled={cleaningLibrary || books.length === 0} className="flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 font-semibold text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-40">
+            <Trash2 className="h-4 w-4" /> {cleaningLibrary ? 'جاري التنظيف...' : 'تنظيف التكرار'}
+          </button>
+          <button onClick={() => void ensureLibraryBooks()} disabled={syncingLibrary} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 font-semibold text-gray-200 transition-colors hover:bg-white/10 disabled:opacity-40">
+            <RefreshCw className={`h-4 w-4 ${syncingLibrary ? 'animate-spin' : ''}`} /> تجهيز كتب المكتبة
+          </button>
+          <button onClick={() => void prepareImportForAllBooks()} disabled={syncingLibrary} className="flex items-center gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 font-semibold text-amber-400 transition-colors hover:bg-amber-500/20 disabled:opacity-40">
+            <Upload className="h-4 w-4" /> استيراد محتوى
+          </button>
+          <button onClick={() => { setEditingBook(null); setShowBookModal(true); }} className="flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 font-semibold text-black transition-colors hover:bg-amber-600">
+            <Plus className="h-4 w-4" /> كتاب جديد
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1 space-y-3">
-          {books.map((book) => (
-            <div key={book.id} className={`rounded-2xl border p-4 transition-all ${selectedBook?.id === book.id ? 'border-amber-500/30 bg-amber-500/10' : 'border-white/10 bg-white/[0.02]'}`}>
-              <div className="flex items-start gap-3">
-                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                  <DynamicIcon name={book.icon || 'BookOpen'} className="w-5 h-5 text-amber-500" />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="space-y-3 lg:col-span-1">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+              <input
+                value={bookSearch}
+                onChange={(event) => setBookSearch(event.target.value)}
+                placeholder="ابحث في الكتب..."
+                className="input pr-10"
+              />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {([
+                ['all', 'الكل'],
+                ['visible', 'الظاهرة'],
+                ['hidden', 'المخفية'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setBookVisibilityFilter(value)}
+                  className={`rounded-lg px-2 py-2 text-xs transition-colors ${
+                    bookVisibilityFilter === value
+                      ? 'bg-amber-500 text-black'
+                      : 'border border-white/10 bg-white/5 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+              <span>{filteredBooks.length} من {books.length} كتاب</span>
+              <span>{books.filter((book) => book.is_visible).length} ظاهر</span>
+            </div>
+          </div>
+          {filteredBooks.map((book) => (
+            <div key={book.id} className={`rounded-2xl border p-4 transition-all ${selectedBook?.id === book.id ? 'border-amber-500/40 bg-amber-500/10' : 'border-white/10 bg-white/[0.02]'}`}>
+              <button onClick={() => setSelectedBookId(book.id)} className="flex w-full items-start gap-3 text-right">
+                <div className="h-16 w-12 shrink-0 overflow-hidden rounded-lg border border-white/10 bg-black/30">
+                  {book.cover_image_url ? <img src={book.cover_image_url} alt={book.title} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center"><BookOpen className="h-5 w-5 text-amber-500" /></div>}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-bold text-white text-sm">{book.title}</h3>
-                  <p className="text-xs text-gray-500 mt-1 line-clamp-2">{book.description || 'دستور متكامل'}</p>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-sm font-bold text-white">{book.title}</h3>
+                  <p className="mt-1 line-clamp-2 text-xs text-gray-500">{book.description || 'كتاب من مكتبة مدينة ساندي'}</p>
                 </div>
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button onClick={() => setSelectedBookId(book.id)} className="px-3 py-1.5 rounded-lg text-xs bg-white/5 text-gray-300">اختيار</button>
-                <button onClick={() => { setEditingBook(book); setShowBookModal(true); }} className="p-2 rounded-lg text-gray-400 hover:bg-white/10"><Pencil className="w-4 h-4" /></button>
-                <button onClick={() => toggleVisible(book)} className="px-3 py-1.5 rounded-lg text-xs text-gray-300 hover:bg-white/10">{book.is_visible ? 'إخفاء' : 'إظهار'}</button>
-                <button onClick={() => openPreviewBook(book)} className="px-3 py-1.5 rounded-lg text-xs text-gray-300 hover:bg-white/10">معاينة</button>
-                <button onClick={() => removeBook(book)} className="p-2 rounded-lg text-red-400 hover:bg-red-500/20"><Trash2 className="w-4 h-4" /></button>
+              </button>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => void duplicateBook(book)} title="نسخ الكتاب" className="rounded-lg px-2 py-1.5 text-xs text-gray-400 hover:bg-white/10">نسخ</button>
+                <button onClick={() => void moveBook(book, -1)} title="تحريك للأعلى" aria-label={`تحريك ${book.title} للأعلى`} className="rounded-lg px-2 py-1.5 text-xs text-gray-400 hover:bg-white/10">↑</button>
+                <button onClick={() => void moveBook(book, 1)} title="تحريك للأسفل" aria-label={`تحريك ${book.title} للأسفل`} className="rounded-lg px-2 py-1.5 text-xs text-gray-400 hover:bg-white/10">↓</button>
+                <button onClick={() => { setEditingBook(book); setShowBookModal(true); }} className="rounded-lg p-2 text-gray-400 hover:bg-white/10"><Pencil className="h-4 w-4" /></button>
+                <button onClick={() => toggleVisible(book)} className="rounded-lg px-3 py-1.5 text-xs text-gray-300 hover:bg-white/10">{book.is_visible ? 'إخفاء' : 'إظهار'}</button>
+                <button onClick={() => openPreviewBook(book)} className="rounded-lg px-3 py-1.5 text-xs text-gray-300 hover:bg-white/10">معاينة</button>
+                <button onClick={() => removeBook(book)} className="rounded-lg p-2 text-red-400 hover:bg-red-500/20"><Trash2 className="h-4 w-4" /></button>
               </div>
             </div>
           ))}
-          {books.length === 0 && <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-8 text-center text-gray-500">لا توجد كتب بعد</div>}
+          {books.length === 0 && <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-gray-500">أنشئ أول كتاب للبدء</div>}
+          {books.length > 0 && filteredBooks.length === 0 && <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-gray-500">لا توجد كتب مطابقة للبحث أو الفلتر.</div>}
         </div>
 
-        <div className="lg:col-span-2 space-y-6">
-          {selectedBook && (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h3 className="text-lg font-bold text-white">الصفحات: {selectedBook.title}</h3>
-                  <p className="text-sm text-gray-500 mt-1">أضف أو عدّل الصفحات وترتيبها من هنا.</p>
-                </div>
-                <button onClick={() => { setEditingPage(null); setShowPageModal(true); }} className="flex items-center gap-2 px-4 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-500 hover:bg-amber-500/20 transition-colors">
-                  <Plus className="w-4 h-4" /> صفحة جديدة
-                </button>
-              </div>
-              <div className="mt-5 space-y-4">
-                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h4 className="font-bold text-white">الصفحات الخاصة</h4>
-                      <p className="text-sm text-gray-500 mt-1">الصفحات الثابتة مثل الغلاف والمقدمة والجدول.</p>
-                    </div>
-                    <button onClick={() => { setEditingPage(null); setShowPageModal(true); }} className="flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-500 hover:bg-amber-500/20 transition-colors">
-                      <Plus className="w-4 h-4" /> صفحة جديدة
-                    </button>
+        <div className="space-y-6 lg:col-span-2">
+          {selectedBook ? (
+            <>
+              <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-white">{selectedBook.title}</h3>
+                    <p className="mt-1 text-sm text-gray-500">صفحات خاصة، ثم أقسام وعناصر منظمة داخل الكتاب.</p>
                   </div>
-                  <div className="mt-4 space-y-3">
-                    {pages.map((page) => (
-                      <div key={page.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h4 className="font-bold text-white">{page.title || 'بدون عنوان'}</h4>
-                              <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/10 text-gray-400">الرقم {page.page_number || 1}</span>
-                            </div>
-                            {page.content && <p className="mt-2 text-sm text-gray-400 whitespace-pre-wrap line-clamp-3">{page.content}</p>}
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => movePage(page.id, -1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronUp className="w-4 h-4" /></button>
-                            <button onClick={() => movePage(page.id, 1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronDown className="w-4 h-4" /></button>
-                            <button onClick={() => { setEditingPage(page); setShowPageModal(true); }} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><Pencil className="w-4 h-4" /></button>
-                            <button onClick={() => removePage(page)} className="p-2 rounded-lg text-red-400 hover:bg-red-500/20"><Trash2 className="w-4 h-4" /></button>
-                          </div>
+                  <button onClick={exportSelectedBook} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-300 hover:bg-white/10">
+                    <Download className="h-4 w-4" /> تصدير نص
+                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => { setEditingPage(null); setShowPageModal(true); }} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-200"><Plus className="h-4 w-4" /> صفحة</button>
+                    <button onClick={() => { setEditingChapter(null); setShowChapterModal(true); }} className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-400"><Plus className="h-4 w-4" /> قسم</button>
+                  </div>
+                </div>
+
+                <div className="mt-5 space-y-3">
+                  {pages.map((page) => (
+                    <div key={page.id} className="flex items-start justify-between gap-3 rounded-xl border border-white/10 bg-black/20 p-4">
+                      <div><h4 className="font-semibold text-white">{page.title}</h4><p className="mt-1 line-clamp-2 text-sm text-gray-500">{page.content}</p></div>
+                      <div className="flex gap-1"><button onClick={() => { setEditingPage(page); setShowPageModal(true); }} className="rounded-lg p-2 text-gray-400 hover:bg-white/10"><Pencil className="h-4 w-4" /></button><button onClick={() => removePage(page)} className="rounded-lg p-2 text-red-400 hover:bg-red-500/20"><Trash2 className="h-4 w-4" /></button></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+                <h3 className="font-bold text-white">الأقسام والمحتوى</h3>
+                <div className="mt-4 space-y-4">
+                  {chapters.map((chapter) => (
+                    <div key={chapter.id} className="rounded-xl border border-white/10 bg-black/20 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div><h4 className="font-bold text-white">{chapter.title}</h4>{chapter.description && <p className="mt-1 text-sm text-gray-500">{chapter.description}</p>}</div>
+                        <div className="flex gap-1">
+                          <button onClick={() => toggleChapterVisible(chapter)} className="rounded-lg px-3 py-1.5 text-xs text-gray-300 hover:bg-white/10">{chapter.is_visible ? 'إخفاء' : 'إظهار'}</button>
+                          <button onClick={() => { setEditingChapter(chapter); setShowChapterModal(true); }} className="rounded-lg p-2 text-gray-400 hover:bg-white/10"><Pencil className="h-4 w-4" /></button>
+                          <button onClick={() => removeChapter(chapter)} className="rounded-lg p-2 text-red-400 hover:bg-red-500/20"><Trash2 className="h-4 w-4" /></button>
                         </div>
                       </div>
-                    ))}
-                    {pages.length === 0 && <div className="rounded-xl border border-dashed border-white/10 bg-black/10 p-8 text-center text-gray-500">لا توجد صفحات بعد</div>}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h4 className="font-bold text-white">الفصول والمادة</h4>
-                      <p className="text-sm text-gray-500 mt-1">أنشئ فصولًا وأضف المواد ضمن كل فصل، ثم حرّك الترتيب أو إخفاء العناصر.</p>
-                    </div>
-                    <button onClick={() => { setEditingChapter(null); setShowChapterModal(true); }} className="flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-500 hover:bg-amber-500/20 transition-colors">
-                      <Plus className="w-4 h-4" /> فصل جديد
-                    </button>
-                  </div>
-
-                  <div className="mt-4 space-y-4">
-                    {chapters.map((chapter) => (
-                      <div key={chapter.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h5 className="font-bold text-white">{chapter.title}</h5>
-                              <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/10 text-gray-400">الفصل {chapter.sort_order}</span>
-                            </div>
-                            {chapter.description && <p className="mt-2 text-sm text-gray-400">{chapter.description}</p>}
+                      <div className="mt-4 space-y-2">
+                        {articles.filter((article) => article.chapter_id === chapter.id).map((article) => (
+                          <div key={article.id} className="flex items-start justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                            <div><div className="flex items-center gap-2"><span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-400">{article.article_number}</span><h5 className="font-semibold text-gray-200">{article.title}</h5></div><p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm text-gray-500">{article.content}</p></div>
+                            <div className="flex gap-1"><button onClick={() => toggleArticleVisible(article)} className="rounded-lg px-2 py-1 text-xs text-gray-400">{article.is_visible ? 'إخفاء' : 'إظهار'}</button><button onClick={() => { setEditingArticle(article); setShowArticleModal(true); }} className="rounded-lg p-2 text-gray-400 hover:bg-white/10"><Pencil className="h-4 w-4" /></button><button onClick={() => removeArticle(article)} className="rounded-lg p-2 text-red-400 hover:bg-red-500/20"><Trash2 className="h-4 w-4" /></button></div>
                           </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => moveChapter(chapter.id, -1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronUp className="w-4 h-4" /></button>
-                            <button onClick={() => moveChapter(chapter.id, 1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronDown className="w-4 h-4" /></button>
-                            <button onClick={() => toggleChapterVisible(chapter)} className="px-3 py-1.5 rounded-lg text-xs text-gray-300 hover:bg-white/10">{chapter.is_visible ? 'إخفاء' : 'إظهار'}</button>
-                            <button onClick={() => { setEditingChapter(chapter); setShowChapterModal(true); }} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><Pencil className="w-4 h-4" /></button>
-                            <button onClick={() => removeChapter(chapter)} className="p-2 rounded-lg text-red-400 hover:bg-red-500/20"><Trash2 className="w-4 h-4" /></button>
-                          </div>
-                        </div>
-
-                        <div className="mt-4 space-y-3">
-                          {articles.filter((article) => article.chapter_id === chapter.id).map((article) => (
-                            <div key={article.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <h6 className="font-semibold text-gray-200">{article.title}</h6>
-                                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400">المادة {article.article_number}</span>
-                                  </div>
-                                  {article.content && <p className="mt-2 text-sm text-gray-400 whitespace-pre-wrap line-clamp-3">{article.content}</p>}
-                                </div>
-                                <div className="flex items-center gap-1 shrink-0">
-                                  <button onClick={() => moveArticle(article.id, -1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronUp className="w-4 h-4" /></button>
-                                  <button onClick={() => moveArticle(article.id, 1)} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><ChevronDown className="w-4 h-4" /></button>
-                                  <button onClick={() => toggleArticleVisible(article)} className="px-3 py-1.5 rounded-lg text-xs text-gray-300 hover:bg-white/10">{article.is_visible ? 'إخفاء' : 'إظهار'}</button>
-                                  <button onClick={() => { setEditingArticle(article); setShowArticleModal(true); }} className="p-2 rounded-lg hover:bg-white/10 text-gray-400"><Pencil className="w-4 h-4" /></button>
-                                  <button onClick={() => removeArticle(article)} className="p-2 rounded-lg text-red-400 hover:bg-red-500/20"><Trash2 className="w-4 h-4" /></button>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                          <button onClick={() => { setEditingArticle(null); setShowArticleModal(true); }} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-white/10 bg-white/[0.03] text-sm text-gray-400 hover:border-amber-500/20 hover:text-amber-400">
-                            <Plus className="w-4 h-4" /> إضافة مادة إلى هذا الفصل
-                          </button>
-                        </div>
+                        ))}
+                        <button onClick={() => { setEditingArticle(null); setShowArticleModal(true); }} className="flex items-center gap-2 rounded-lg border border-dashed border-white/10 px-3 py-2 text-sm text-gray-400 hover:border-amber-500/30 hover:text-amber-400"><Plus className="h-4 w-4" /> إضافة عنصر</button>
                       </div>
-                    ))}
-                    {chapters.length === 0 && <div className="rounded-xl border border-dashed border-white/10 bg-black/10 p-8 text-center text-gray-500">لا توجد فصول بعد</div>}
-                  </div>
+                    </div>
+                  ))}
+                  {chapters.length === 0 && <div className="rounded-xl border border-dashed border-white/10 p-8 text-center text-gray-500">لا يوجد محتوى بعد. استخدم الاستيراد أو أنشئ قسمًا.</div>}
                 </div>
               </div>
-            </div>
-          )}
+            </>
+          ) : <div className="rounded-2xl border border-dashed border-white/10 p-12 text-center text-gray-500">اختر كتابًا</div>}
 
-          {previewBook && (
-            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-5">
-              <div className="flex items-center justify-between gap-4 mb-4">
-                <div>
-                  <h3 className="text-lg font-bold text-white">معاينة: {previewBook.title}</h3>
-                  <p className="text-sm text-gray-500 mt-1">استعرض الشكل النهائي قبل نشره.</p>
-                </div>
-                <button onClick={() => setPreviewBook(null)} className="px-3 py-2 rounded-lg bg-white/10 text-gray-300">إغلاق</button>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-[#0a0a0f] p-4">
-                <BookReader book={previewBook} pages={previewPages} chapters={chapters} articles={articles} loading={false} />
-              </div>
-            </div>
-          )}
+          {previewBook && <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5"><div className="mb-4 flex justify-between"><h3 className="font-bold text-white">معاينة: {previewBook.title}</h3><button onClick={() => setPreviewBook(null)} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-gray-300">إغلاق</button></div><BookReader book={previewBook} pages={previewPages} chapters={chapters.filter((chapter) => chapter.book_id === previewBook.id)} articles={articles.filter((article) => article.book_id === previewBook.id)} loading={false} /></div>}
         </div>
       </div>
 
-      {showImportModal && selectedBook && (
-        <Modal title={`استيراد دستور إلى ${selectedBook.title}`} onClose={() => !importing && setShowImportModal(false)}>
-          <div className="space-y-4">
-            <p className="text-sm leading-relaxed text-gray-400">الصق الدستور كاملًا. سيكتشف النظام الأبواب والمواد ويرتبها تلقائيًا. استخدم صيغة «الباب الأول» و«المادة (1): عنوان المادة».</p>
-            <textarea value={importText} onChange={(event) => setImportText(event.target.value)} rows={16} dir="rtl" placeholder="الصق نص الدستور هنا..." className="w-full resize-y rounded-xl border border-white/10 bg-[#0a0a0f] p-4 text-sm leading-loose text-white outline-none focus:border-amber-500/50" />
-            <div className="flex gap-3">
-              <button onClick={importConstitution} disabled={importing || !importText.trim()} className="flex-1 rounded-lg bg-amber-500 px-4 py-2.5 font-semibold text-black hover:bg-amber-600 disabled:opacity-50">{importing ? 'جاري الاستيراد...' : 'استيراد وترتيب الدستور'}</button>
-              <button onClick={() => setShowImportModal(false)} disabled={importing} className="rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-gray-300 hover:bg-white/10 disabled:opacity-50">إلغاء</button>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {showBookModal && (
-        <BookModal
-          book={editingBook}
-          onClose={() => { setShowBookModal(false); setEditingBook(null); }}
-          onSaved={async () => { setShowBookModal(false); setEditingBook(null); await loadBooks(); }}
-        />
-      )}
-      {showPageModal && selectedBook && (
-        <PageModal
-          book={selectedBook}
-          page={editingPage}
-          onClose={() => { setShowPageModal(false); setEditingPage(null); }}
-          onSaved={async () => { setShowPageModal(false); setEditingPage(null); if (selectedBookId) await loadPages(selectedBookId); }}
-        />
-      )}
-      {showChapterModal && selectedBook && (
-        <ChapterModal
-          book={selectedBook}
-          chapter={editingChapter}
-          onClose={() => { setShowChapterModal(false); setEditingChapter(null); }}
-          onSaved={async () => { setShowChapterModal(false); setEditingChapter(null); if (selectedBookId) await loadConstitutionContent(selectedBookId); }}
-        />
-      )}
-      {showArticleModal && selectedBook && (
-        <ArticleModal
-          book={selectedBook}
-          article={editingArticle}
-          chapterId={editingArticle?.chapter_id || null}
-          onClose={() => { setShowArticleModal(false); setEditingArticle(null); }}
-          onSaved={async () => { setShowArticleModal(false); setEditingArticle(null); if (selectedBookId) await loadConstitutionContent(selectedBookId); }}
-        />
-      )}
+      {showImportModal && <BookImportModal books={books} defaultBookId={selectedBookId} onClose={() => setShowImportModal(false)} onImported={async (bookId) => { setShowImportModal(false); setSelectedBookId(bookId); await loadPages(bookId); await loadBookContent(bookId); }} />}
+      {showBookModal && <BookModal book={editingBook} onClose={() => { setShowBookModal(false); setEditingBook(null); }} onSaved={async () => { setShowBookModal(false); setEditingBook(null); await loadBooks(); }} />}
+      {showPageModal && selectedBook && <PageModal book={selectedBook} page={editingPage} onClose={() => { setShowPageModal(false); setEditingPage(null); }} onSaved={async () => { setShowPageModal(false); setEditingPage(null); await loadPages(selectedBookId); }} />}
+      {showChapterModal && selectedBook && <ChapterModal book={selectedBook} chapter={editingChapter} onClose={() => { setShowChapterModal(false); setEditingChapter(null); }} onSaved={async () => { setShowChapterModal(false); setEditingChapter(null); await loadBookContent(selectedBookId); }} />}
+      {showArticleModal && selectedBook && <ArticleModal book={selectedBook} article={editingArticle} chapterId={editingArticle?.chapter_id || null} onClose={() => { setShowArticleModal(false); setEditingArticle(null); }} onSaved={async () => { setShowArticleModal(false); setEditingArticle(null); await loadBookContent(selectedBookId); }} />}
     </div>
+  );
+}
+
+function BookImportModal({ books, defaultBookId, onClose, onImported }: { books: Book[]; defaultBookId: string | null; onClose: () => void; onImported: (bookId: string) => Promise<void> }) {
+  const [bookId, setBookId] = useState(defaultBookId || books[0]?.id || '');
+  const [rawText, setRawText] = useState('');
+  const [replaceExisting, setReplaceExisting] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+  const parsed = parseImportedBookContent(rawText);
+  const itemCount = parsed.reduce((sum, section) => sum + section.items.length, 0);
+  const emptyItemCount = parsed.reduce((sum, section) => sum + section.items.filter((item) => !item.content.trim()).length, 0);
+
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!isDirty || importing) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty, importing]);
+
+  function requestClose() {
+    if (isDirty && !importing && !window.confirm('يوجد محتوى لم يتم استيراده. هل تريد إغلاق النافذة؟')) return;
+    onClose();
+  }
+
+  async function runImport() {
+    if (!bookId || !rawText.trim() || parsed.length === 0) return;
+    if (!window.confirm(`سيتم استيراد ${parsed.length} قسم و${itemCount} عنصر إلى الكتاب المختار. هل تريد المتابعة؟`)) return;
+    setImporting(true);
+    try {
+      if (replaceExisting) {
+        await supabase.from('constitution_articles').delete().eq('book_id', bookId);
+        await supabase.from('constitution_chapters').delete().eq('book_id', bookId);
+      }
+
+      let sectionOffset = 0;
+      if (!replaceExisting) {
+        const { data } = await supabase.from('constitution_chapters').select('sort_order').eq('book_id', bookId).order('sort_order', { ascending: false }).limit(1).maybeSingle();
+        sectionOffset = data ? Number(data.sort_order) + 1 : 0;
+      }
+
+      for (let sectionIndex = 0; sectionIndex < parsed.length; sectionIndex += 1) {
+        const section = parsed[sectionIndex];
+        const { data: insertedChapter, error: chapterError } = await supabase.from('constitution_chapters').insert({
+          book_id: bookId,
+          title: section.title,
+          description: section.description,
+          sort_order: sectionOffset + sectionIndex,
+          is_visible: true,
+        }).select('*').single();
+        if (chapterError || !insertedChapter) throw chapterError || new Error('تعذر إنشاء القسم');
+
+        if (section.items.length) {
+          const rows = section.items.map((item, itemIndex) => ({
+            book_id: bookId,
+            chapter_id: insertedChapter.id,
+            article_number: item.number,
+            title: item.title,
+            content: item.content,
+            sort_order: itemIndex,
+            is_visible: true,
+          }));
+          const { error: articleError } = await supabase.from('constitution_articles').insert(rows);
+          if (articleError) throw articleError;
+        }
+      }
+      setIsDirty(false);
+      await onImported(bookId);
+    } catch (error) {
+      alert(`تعذر الاستيراد: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <Modal title="استيراد محتوى إلى كتاب" onClose={requestClose}>
+      <div className="space-y-4">
+        <Field label="اختر الكتاب">
+          <select value={bookId} onChange={(event) => setBookId(event.target.value)} className="input">
+            {books.map((book) => <option key={book.id} value={book.id}>{book.title}</option>)}
+          </select>
+        </Field>
+        <Field label="المحتوى" hint="يدعم الباب، الفصل، القسم، المادة، القاعدة، العقوبة، البند والإجراء">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <label className="cursor-pointer rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-300 hover:bg-white/10">
+              رفع ملف TXT
+              <input
+                type="file"
+                accept=".txt,text/plain"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    setRawText(String(reader.result || ''));
+                    setIsDirty(true);
+                  };
+                  reader.readAsText(file, 'utf-8');
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+            {rawText && (
+              <button onClick={() => { setRawText(''); setIsDirty(false); }} className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-400 hover:text-white">
+                مسح النص
+              </button>
+            )}
+          </div>
+          <textarea value={rawText} onChange={(event) => { setRawText(event.target.value); setIsDirty(true); }} className="input min-h-[260px] resize-y" placeholder={'الباب الأول: الأحكام العامة\n\nالمادة (1): عنوان المادة\nنص المادة...'} />
+        </Field>
+        <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-amber-500/15 bg-amber-500/5 p-3"><input type="checkbox" checked={replaceExisting} onChange={(event) => setReplaceExisting(event.target.checked)} className="h-4 w-4 accent-amber-500" /><span className="text-sm text-gray-300">استبدال محتوى الكتاب الحالي بالكامل قبل الاستيراد</span></label>
+        <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-gray-400">
+          سيتم الاستيراد إلى <strong className="text-amber-300">{books.find((book) => book.id === bookId)?.title || 'الكتاب المختار'}</strong>. تم اكتشاف <strong className="text-white">{parsed.length}</strong> قسم و<strong className="text-white">{itemCount}</strong> عنصر.
+          {rawText.trim() && parsed.length === 0 && (
+            <div className="mt-2 text-red-300">لم يتعرف النظام على بنية المحتوى. استخدم عناوين مثل «الباب الأول» ثم «المادة (1)».</div>
+          )}
+        </div>
+        {emptyItemCount > 0 && (
+          <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-200">
+            يوجد {emptyItemCount} عنصر بدون نص. يمكنك الاستيراد، لكن يفضل مراجعة المحتوى أولًا.
+          </div>
+        )}
+        {parsed.length > 0 && (
+          <div className="max-h-44 space-y-2 overflow-y-auto rounded-xl border border-white/10 bg-white/[0.02] p-3">
+            {parsed.map((section, index) => (
+              <div key={`${section.title}-${index}`} className="flex items-center justify-between gap-3 rounded-lg bg-black/20 px-3 py-2 text-sm">
+                <span className="text-gray-200">{section.title}</span>
+                <span className="text-xs text-gray-500">{section.items.length} عنصر</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="mt-6 flex gap-3"><button onClick={runImport} disabled={importing || !bookId || !rawText.trim() || parsed.length === 0} className="flex-1 rounded-lg bg-amber-500 px-4 py-2.5 font-semibold text-black hover:bg-amber-600 disabled:opacity-40">{importing ? 'جاري الاستيراد...' : 'استيراد وترتيب'}</button><button onClick={requestClose} disabled={importing} className="rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-gray-300 disabled:opacity-40">إلغاء</button></div>
+    </Modal>
   );
 }
 
@@ -2079,19 +2493,84 @@ function BookModal({ book, onClose, onSaved }: { book: Book | null; onClose: () 
   const [icon, setIcon] = useState(book?.icon || 'BookOpen');
   const [visible, setVisible] = useState(book?.is_visible ?? true);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  async function uploadCover(file: File) {
+    if (!file.type.startsWith('image/')) {
+      alert('اختر ملف صورة صالح.');
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      alert('حجم الغلاف يجب ألا يتجاوز 8MB.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+      const safeName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+      const path = `book-covers/${safeName}`;
+      const { error } = await supabase.storage.from('site-media').upload(path, file, { upsert: false, contentType: file.type });
+      if (error) throw error;
+      const { data } = supabase.storage.from('site-media').getPublicUrl(path);
+      setCoverImageUrl(data.publicUrl);
+    } catch (error) {
+      alert(`تعذر رفع الغلاف: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function save() {
-    if (!title.trim()) return;
+    const cleanedTitle = title.trim();
+    if (!cleanedTitle) return;
     setSaving(true);
-    if (book) {
-      const { error } = await supabase.from('books').update({ title: title.trim(), description: description.trim(), cover_image_url: coverImageUrl.trim(), icon, is_visible: visible }).eq('id', book.id);
-      if (error) alert(`تعذر الحفظ: ${error.message}`); else await onSaved();
-    } else {
-      const { data } = await supabase.from('books').select('sort_order').order('sort_order', { ascending: false }).limit(1).maybeSingle();
-      const { error } = await supabase.from('books').insert({ title: title.trim(), description: description.trim(), cover_image_url: coverImageUrl.trim(), icon, is_visible: visible, sort_order: data ? data.sort_order + 1 : 0 });
-      if (error) alert(`تعذر إنشاء الكتاب: ${error.message}`); else await onSaved();
+    try {
+      const { data: existingRows, error: lookupError } = await supabase
+        .from('books')
+        .select('id,title');
+      if (lookupError) throw lookupError;
+
+      const normalizedRequested = normalizeBookTitle(cleanedTitle);
+      const duplicate = (existingRows || []).find((row) =>
+        row.id !== book?.id && normalizeBookTitle(row.title) === normalizedRequested,
+      );
+      if (duplicate) {
+        alert(`يوجد كتاب آخر بنفس الاسم أو باسم مشابه: ${duplicate.title}`);
+        return;
+      }
+
+      if (book) {
+        const { error } = await supabase.from('books').update({
+          title: cleanedTitle,
+          description: description.trim(),
+          cover_image_url: coverImageUrl.trim(),
+          icon,
+          is_visible: visible,
+        }).eq('id', book.id);
+        if (error) throw error;
+      } else {
+        const { data } = await supabase
+          .from('books')
+          .select('sort_order')
+          .order('sort_order', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const { error } = await supabase.from('books').insert({
+          title: cleanedTitle,
+          description: description.trim(),
+          cover_image_url: coverImageUrl.trim(),
+          icon,
+          is_visible: visible,
+          sort_order: data ? Number(data.sort_order) + 1 : 0,
+        });
+        if (error) throw error;
+      }
+      await onSaved();
+    } catch (error) {
+      alert(`تعذر حفظ الكتاب: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -2099,7 +2578,26 @@ function BookModal({ book, onClose, onSaved }: { book: Book | null; onClose: () 
       <div className="space-y-4">
         <Field label="عنوان الكتاب"><input value={title} onChange={(e) => setTitle(e.target.value)} className="input" placeholder="مثال: دستور مدينة ساندي" autoFocus /></Field>
         <Field label="الوصف"><textarea value={description} onChange={(e) => setDescription(e.target.value)} className="input resize-y min-h-[120px]" placeholder="وصف مختصر" /></Field>
-        <Field label="غلاف الكتاب" hint="اختياري، اختر صورة مباشرة من جهازك"><MediaUploader value={coverImageUrl} onChange={setCoverImageUrl} kind="image" label="اختيار صورة غلاف" /></Field>
+        <Field label="غلاف الكتاب" hint="ارفع صورة من جهازك أو استخدم رابطًا مباشرًا">
+          <div className="space-y-3">
+            <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-400 hover:bg-amber-500/15">
+              <Upload className="h-4 w-4" /> {uploading ? 'جاري الرفع...' : 'اختيار صورة الغلاف'}
+              <input type="file" accept="image/*" disabled={uploading} className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadCover(file); event.currentTarget.value = ''; }} />
+            </label>
+            <input value={coverImageUrl} onChange={(e) => setCoverImageUrl(e.target.value)} className="input" dir="ltr" placeholder="https://example.com/cover.jpg" />
+            {coverImageUrl && (
+              <img
+                src={coverImageUrl}
+                alt="معاينة الغلاف"
+                onError={(event) => {
+                  event.currentTarget.onerror = null;
+                  event.currentTarget.src = '/library/constitution.jpg';
+                }}
+                className="mx-auto h-52 w-36 rounded-xl border border-white/10 object-cover"
+              />
+            )}
+          </div>
+        </Field>
         <Field label="الأيقونة"><select value={icon} onChange={(e) => setIcon(e.target.value)} className="input"><option value="BookOpen">BookOpen</option><option value="FileText">FileText</option><option value="Scale">Scale</option><option value="Shield">Shield</option><option value="Users">Users</option></select></Field>
         <label className="flex items-center gap-3 cursor-pointer">
           <input type="checkbox" checked={visible} onChange={(e) => setVisible(e.target.checked)} className="w-4 h-4 accent-amber-500" />
@@ -2120,19 +2618,73 @@ function PageModal({ book, page, onClose, onSaved }: { book: Book; page: BookPag
   const [imageUrl, setImageUrl] = useState(page?.image_url || '');
   const [pageNumber, setPageNumber] = useState(page?.page_number || 1);
   const [saving, setSaving] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+
+  async function uploadPageImage(file: File) {
+    if (!file.type.startsWith('image/')) {
+      alert('اختر ملف صورة صالح.');
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      alert('حجم الصورة يجب ألا يتجاوز 8MB.');
+      return;
+    }
+    setUploadingImage(true);
+    try {
+      const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+      const safeName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+      const path = `book-pages/${safeName}`;
+      const { error } = await supabase.storage.from('site-media').upload(path, file, {
+        upsert: false,
+        contentType: file.type,
+      });
+      if (error) throw error;
+      const { data } = supabase.storage.from('site-media').getPublicUrl(path);
+      setImageUrl(data.publicUrl);
+    } catch (error) {
+      alert(`تعذر رفع صورة الصفحة: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setUploadingImage(false);
+    }
+  }
 
   async function save() {
     if (!title.trim()) return;
     setSaving(true);
-    if (page) {
-      const { error } = await supabase.from('book_pages').update({ title: title.trim(), content: content.trim(), image_url: imageUrl.trim(), page_number: pageNumber }).eq('id', page.id);
-      if (error) alert(`تعذر الحفظ: ${error.message}`); else await onSaved();
-    } else {
-      const { data } = await supabase.from('book_pages').select('sort_order').eq('book_id', book.id).order('sort_order', { ascending: false }).limit(1).maybeSingle();
-      const { error } = await supabase.from('book_pages').insert({ book_id: book.id, title: title.trim(), content: content.trim(), image_url: imageUrl.trim(), page_number: pageNumber, sort_order: data ? data.sort_order + 1 : 0 });
-      if (error) alert(`تعذر إنشاء الصفحة: ${error.message}`); else await onSaved();
+    try {
+      if (page) {
+        const { error } = await supabase.from('book_pages').update({
+          title: title.trim(),
+          content: content.trim(),
+          image_url: imageUrl.trim(),
+          page_number: Math.max(1, Number(pageNumber) || 1),
+        }).eq('id', page.id);
+        if (error) throw error;
+      } else {
+        const { data, error: orderError } = await supabase
+          .from('book_pages')
+          .select('sort_order')
+          .eq('book_id', book.id)
+          .order('sort_order', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (orderError) throw orderError;
+        const { error } = await supabase.from('book_pages').insert({
+          book_id: safeBookId,
+          title: title.trim(),
+          content: content.trim(),
+          image_url: imageUrl.trim(),
+          page_number: Math.max(1, Number(pageNumber) || 1),
+          sort_order: data ? Number(data.sort_order) + 1 : 0,
+        });
+        if (error) throw error;
+      }
+      await onSaved();
+    } catch (error) {
+      alert(`تعذر حفظ الصفحة: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -2141,7 +2693,36 @@ function PageModal({ book, page, onClose, onSaved }: { book: Book; page: BookPag
         <Field label="عنوان الصفحة"><input value={title} onChange={(e) => setTitle(e.target.value)} className="input" placeholder="مثال: المقدمة" autoFocus /></Field>
         <Field label="رقم الصفحة"><input value={pageNumber} onChange={(e) => setPageNumber(Number(e.target.value) || 1)} type="number" min="1" className="input" /></Field>
         <Field label="المحتوى"><textarea value={content} onChange={(e) => setContent(e.target.value)} className="input resize-y min-h-[180px]" placeholder="اكتب نص الصفحة هنا..." /></Field>
-        <Field label="صورة الصفحة" hint="اختياري، اختر صورة مباشرة من جهازك"><MediaUploader value={imageUrl} onChange={setImageUrl} kind="image" label="اختيار صورة للصفحة" /></Field>
+        <Field label="صورة الصفحة" hint="اختيارية: ارفع صورة أو أدخل رابطًا مباشرًا">
+          <div className="space-y-3">
+            <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-400 hover:bg-amber-500/15">
+              <Upload className="h-4 w-4" /> {uploadingImage ? 'جاري الرفع...' : 'اختيار صورة من الجهاز'}
+              <input
+                type="file"
+                accept="image/*"
+                disabled={uploadingImage}
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void uploadPageImage(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+            <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} className="input" dir="ltr" placeholder="https://example.com/page.jpg" />
+            {imageUrl && (
+              <img
+                src={imageUrl}
+                alt="معاينة صورة الصفحة"
+                onError={(event) => {
+                  event.currentTarget.onerror = null;
+                  event.currentTarget.src = '/library/constitution.jpg';
+                }}
+                className="max-h-64 w-full rounded-xl border border-white/10 object-cover"
+              />
+            )}
+          </div>
+        </Field>
       </div>
       <div className="flex gap-3 mt-6">
         <button onClick={save} disabled={saving || !title.trim()} className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-black font-semibold rounded-lg transition-colors">{saving ? 'جاري الحفظ...' : 'حفظ'}</button>
@@ -2160,25 +2741,48 @@ function ChapterModal({ book, chapter, onClose, onSaved }: { book: Book; chapter
   async function save() {
     if (!title.trim()) return;
     setSaving(true);
-    if (chapter) {
-      const { error } = await supabase.from('constitution_chapters').update({ title: title.trim(), description: description.trim(), is_visible: visible }).eq('id', chapter.id);
-      if (error) alert(`تعذر الحفظ: ${error.message}`); else await onSaved();
-    } else {
-      const { data } = await supabase.from('constitution_chapters').select('sort_order').eq('book_id', book.id).order('sort_order', { ascending: false }).limit(1).maybeSingle();
-      const { error } = await supabase.from('constitution_chapters').insert({ book_id: book.id, title: title.trim(), description: description.trim(), sort_order: data ? data.sort_order + 1 : 0, is_visible: visible });
-      if (error) alert(`تعذر إنشاء الفصل: ${error.message}`); else await onSaved();
+    try {
+      if (chapter) {
+        const { error } = await supabase.from('constitution_chapters').update({
+          title: title.trim(),
+          description: description.trim(),
+          is_visible: visible,
+        }).eq('id', chapter.id);
+        if (error) throw error;
+      } else {
+        const { data, error: orderError } = await supabase
+          .from('constitution_chapters')
+          .select('sort_order')
+          .eq('book_id', book.id)
+          .order('sort_order', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (orderError) throw orderError;
+        const { error } = await supabase.from('constitution_chapters').insert({
+          book_id: safeBookId,
+          title: title.trim(),
+          description: description.trim(),
+          sort_order: data ? Number(data.sort_order) + 1 : 0,
+          is_visible: visible,
+        });
+        if (error) throw error;
+      }
+      await onSaved();
+    } catch (error) {
+      alert(`تعذر حفظ الفصل: ${error instanceof Error ? error.message : 'خطأ غير معروف'}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
-    <Modal title={chapter ? 'تعديل الفصل' : 'فصل جديد'} onClose={onClose}>
+    <Modal title={chapter ? 'تعديل القسم' : 'قسم جديد'} onClose={onClose}>
       <div className="space-y-4">
-        <Field label="عنوان الفصل"><input value={title} onChange={(e) => setTitle(e.target.value)} className="input" placeholder="مثال: الأحكام العامة" autoFocus /></Field>
-        <Field label="الوصف"><textarea value={description} onChange={(e) => setDescription(e.target.value)} className="input resize-y min-h-[110px]" placeholder="وصف مختصر للفصل" /></Field>
+        <Field label="عنوان القسم"><input value={title} onChange={(e) => setTitle(e.target.value)} className="input" placeholder="مثال: الأحكام العامة" autoFocus /></Field>
+        <Field label="الوصف"><textarea value={description} onChange={(e) => setDescription(e.target.value)} className="input resize-y min-h-[110px]" placeholder="وصف مختصر للقسم" /></Field>
         <label className="flex items-center gap-3 cursor-pointer">
           <input type="checkbox" checked={visible} onChange={(e) => setVisible(e.target.checked)} className="w-4 h-4 accent-amber-500" />
-          <span className="text-sm text-gray-300">إظهار الفصل في الموقع</span>
+          <span className="text-sm text-gray-300">إظهار القسم في الموقع</span>
         </label>
       </div>
       <div className="flex gap-3 mt-6">
@@ -2214,7 +2818,7 @@ function ArticleModal({ book, article, chapterId, onClose, onSaved }: { book: Bo
       if (error) alert(`تعذر الحفظ: ${error.message}`); else await onSaved();
     } else {
       const { data } = await supabase.from('constitution_articles').select('sort_order').eq('book_id', book.id).order('sort_order', { ascending: false }).limit(1).maybeSingle();
-      const { error } = await supabase.from('constitution_articles').insert({ book_id: book.id, chapter_id: selectedChapterId, article_number: articleNumber, title: title.trim(), content: content.trim(), sort_order: data ? data.sort_order + 1 : 0, is_visible: visible });
+      const { error } = await supabase.from('constitution_articles').insert({ book_id: safeBookId, chapter_id: selectedChapterId, article_number: articleNumber, title: title.trim(), content: content.trim(), sort_order: data ? data.sort_order + 1 : 0, is_visible: visible });
       if (error) alert(`تعذر إنشاء المادة: ${error.message}`); else await onSaved();
     }
     setSaving(false);
@@ -2279,8 +2883,8 @@ function SettingsPanel({ settings, onUpdate }: { settings: Settings; onUpdate: (
         <Field label="وصف السيرفر">
           <textarea value={form.server_description} onChange={(e) => setForm({ ...form, server_description: e.target.value })} rows={2} className="input resize-none" />
         </Field>
-        <Field label="شعار السيرفر" hint="اختر صورة من جهازك لتظهر كشعار في أعلى الموقع">
-          <MediaUploader value={form.logo_url} onChange={(url) => setForm({ ...form, logo_url: url })} kind="image" label="اختيار شعار السيرفر" />
+        <Field label="شعار السيرفر (رابط صورة)" hint="ضع رابط صورة ليظهر كشعار في أعلى الموقع">
+          <input value={form.logo_url} onChange={(e) => setForm({ ...form, logo_url: e.target.value })} placeholder="https://example.com/logo.png" className="input" dir="ltr" />
         </Field>
         <Field label="آيبي السيرفر">
           <input value={form.server_ip} onChange={(e) => setForm({ ...form, server_ip: e.target.value })} className="input" dir="ltr" />
